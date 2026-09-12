@@ -2,8 +2,10 @@
 .env.*
 !.env.example
 .venv/
+manual_validation/
 
 __pycache__/
+**/__pycache__/
 *.py[cod]
 .pytest_cache/
 
@@ -11,6 +13,9 @@ output/
 *.tmp
 *.temp
 *.log
+*.bak
+*.swp
+.test_tmp/
 ~$*
 *.docx
 *.sqlite
