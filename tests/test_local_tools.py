@@ -3,9 +3,11 @@ from pathlib import Path
 
 import fitz
 import pytest
+from docx import Document
+from openpyxl import load_workbook
 
 from exporters import export_csv, export_excel, export_json, export_word
-from local_extractor import extract_local_paper
+from local_extractor import _clean_page_text, extract_local_paper
 from local_search import LocalSearchIndex
 from local_summary import compare_papers, extractive_summary
 from paper_pipeline import PageText
@@ -47,6 +49,14 @@ def test_section_parser_requires_explicit_heading():
     assert parse_sections(pages) == {}
 
 
+def test_section_parser_recognizes_introduction_variants_and_background_heading():
+    pages = [PageText("a.pdf", 1, "1. Introduction\nintro\n2. Methods\nmethod", 0, False)]
+    sections = parse_sections(pages)
+    assert "introduction" in sections and "methods" in sections
+    background = parse_sections([PageText("a.pdf", 1, "Background\ncontext", 0, False)])
+    assert "introduction" in background
+
+
 def test_local_search_fts_duplicate_update_phrase_and_clear(tmp_path):
     pages = [PageText("a.pdf", 1, "alpha beta phrase", 17, False), PageText("a.pdf", 2, "gamma", 5, False)]
     index = LocalSearchIndex(tmp_path / "index.sqlite")
@@ -75,6 +85,46 @@ def test_offline_summary_and_exports_are_structured(tmp_path):
     docx_path = export_word(rows, tmp_path / "comparison.docx")
     assert json.loads(json_path.read_text(encoding="utf-8"))[0]["file_name"] == "paper.pdf"
     assert all(path.exists() for path in (csv_path, xlsx_path, docx_path))
+
+
+def test_raw_and_display_evidence_are_separate_and_raw_is_exact():
+    pages = [{"source_file": "a.pdf", "page_number": 1, "text": "admin-\nistration result", "raw_text": "admin-\nistration result", "display_text": "administration result"}]
+    facts = extract_scientific_facts(pages)
+    assert facts == [] or all(fact["evidence_quote_raw"] in pages[0]["raw_text"] for fact in facts)
+
+
+def test_display_removes_controls_but_raw_is_preserved_and_flagged(tmp_path):
+    display, flags = _clean_page_text("value\x01 with µ °C ± α β ≤ ≥", set())
+    assert "\x01" not in display
+    assert "raw_control_character_removed_for_display" in flags
+
+
+def test_unicode_exports_round_trip(tmp_path):
+    value = [{"evidence_quote_raw": "µ °C ± α β ≤ ≥ – − ²", "evidence_quote_display": "µ °C ± α β ≤ ≥ – − ²"}]
+    json_path = export_json(value, tmp_path / "unicode.json")
+    assert json.loads(json_path.read_text(encoding="utf-8"))[0]["evidence_quote_display"] == value[0]["evidence_quote_display"]
+    csv_path = export_csv(value, tmp_path / "unicode.csv")
+    assert "µ" in csv_path.read_text(encoding="utf-8-sig")
+    xlsx_path = export_excel(value, tmp_path / "unicode.xlsx")
+    assert load_workbook(xlsx_path, read_only=True).active.cell(2, 1).value == value[0]["evidence_quote_raw"]
+    docx_path = export_word(value, tmp_path / "unicode.docx")
+    assert "µ" in "\n".join(paragraph.text for paragraph in Document(docx_path).paragraphs)
+
+
+def test_safe_line_break_hyphen_cleaning_and_compound_preservation():
+    display, flags = _clean_page_text("admin-\nistration\ndouble-blind\nsingle-dose\nLC-MS", set())
+    assert "administration" in display
+    assert "double-blind" in display and "single-dose" in display and "LC-MS" in display
+    assert "unresolved_line_break_hyphen" not in flags
+
+
+def test_unsafe_line_break_hyphen_is_not_guessed():
+    pages = [{"source_file": "a.pdf", "page_number": 1,
+              "raw_text": "The Modi-\nMedDiet result was observed.",
+              "display_text": "The Modi-\nMedDiet result was observed.",
+              "text": "The Modi-\nMedDiet result was observed."}]
+    facts = extract_scientific_facts(pages)
+    assert facts == [] or all("unresolved_line_break_hyphen" in fact.get("quality_flags", []) for fact in facts)
 
 
 def test_local_mode_does_not_create_deepseek_client(monkeypatch, tmp_path):

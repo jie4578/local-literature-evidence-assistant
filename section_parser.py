@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 SECTION_ALIASES = {
     "abstract": ("abstract", "摘要"),
+    "introduction": ("introduction", "background", "背景", "引言", "绪论"),
     "methods": ("methods", "method", "materials and methods", "研究方法", "方法"),
     "results": ("results", "结果", "研究结果"),
     "discussion": ("discussion", "讨论"),
@@ -30,18 +31,20 @@ def parse_sections(pages: Iterable[Any]) -> dict[str, dict[str, Any]]:
     sections: dict[str, dict[str, Any]] = {}
     current: dict[str, Any] | None = None
     for page in pages:
-        for raw_line in page.text.splitlines():
+        page_text = page.get("display_text", page.get("text", "")) if isinstance(page, dict) else page.text
+        page_number = page.get("page_number", 0) if isinstance(page, dict) else page.page_number
+        for raw_line in page_text.splitlines():
             line = raw_line.strip()
             kind = _heading_kind(line)
             if kind:
                 if kind == "references" and "references" not in sections:
-                    sections[kind] = {"title": line, "text": "", "page_start": page.page_number, "page_end": page.page_number}
+                    sections[kind] = {"title": line, "text": "", "page_start": page_number, "page_end": page_number}
                     current = sections[kind]
                 else:
-                    current = sections.setdefault(kind, {"title": line, "text": "", "page_start": page.page_number, "page_end": page.page_number})
-                    current["page_end"] = page.page_number
+                    current = sections.setdefault(kind, {"title": line, "text": "", "page_start": page_number, "page_end": page_number})
+                    current["page_end"] = page_number
                 continue
             if current is not None and line:
                 current["text"] = (current["text"] + "\n" + line).strip()
-                current["page_end"] = page.page_number
+                current["page_end"] = page_number
     return sections

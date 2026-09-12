@@ -32,14 +32,35 @@ def _sentences(text: str) -> Iterable[str]:
             yield value
 
 
+def _raw_quote_for_display(display_sentence: str, raw_text: str) -> str | None:
+    normalized_target = re.sub(r"\s+", " ", display_sentence).strip()
+    for candidate in _sentences(raw_text):
+        normalized_candidate = re.sub(r"\s+", " ", candidate).strip()
+        if normalized_target in normalized_candidate or normalized_candidate in normalized_target:
+            return candidate
+    return display_sentence if display_sentence in raw_text else None
+
+
 def extract_scientific_facts(pages: Iterable[Any]) -> list[dict[str, Any]]:
     facts = []
     for page in pages:
-        for sentence in _sentences(page.text):
+        display_text = page.get("display_text", page.get("text", "")) if isinstance(page, dict) else page.text
+        raw_text = page.get("raw_text", page.get("text", "")) if isinstance(page, dict) else page.text
+        for sentence in _sentences(display_text):
             for category, pattern in RULES.items():
                 if re.search(pattern, sentence, flags=re.IGNORECASE):
+                    raw_quote = _raw_quote_for_display(sentence, raw_text)
+                    if not raw_quote:
+                        continue
+                    quality_flags = ["replacement_character"] if "�" in raw_quote else []
+                    if sentence.rstrip().endswith("-"):
+                        quality_flags.append("unresolved_line_break_hyphen")
+                    source_type = "heading" if sentence.strip() == sentence.strip().title() and len(sentence.split()) <= 8 else "unknown"
                     facts.append({"category": category, "evidence_quote": sentence,
-                                  "source_file": page.source_file, "pdf_page_start": page.page_number,
-                                  "pdf_page_end": page.page_number, "extraction_method": "rule",
-                                  "verified": True})
+                                  "evidence_quote_display": sentence, "evidence_quote_raw": raw_quote,
+                                  "source_file": page.get("source_file") if isinstance(page, dict) else page.source_file,
+                                  "pdf_page_start": page.get("page_number") if isinstance(page, dict) else page.page_number,
+                                  "pdf_page_end": page.get("page_number") if isinstance(page, dict) else page.page_number,
+                                  "extraction_method": "rule", "source_type": source_type,
+                                  "verified": raw_quote in raw_text, "quality_flags": quality_flags})
     return facts

@@ -12,7 +12,7 @@ def compare_papers(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         facts = paper.get("facts", [])
         sample_facts = [f["evidence_quote"] for f in facts if f["category"] == "sample_size"]
         def quotes(categories):
-            return [fact["evidence_quote"] for fact in facts if fact["category"] in categories]
+            return [fact.get("evidence_quote_display", fact["evidence_quote"]) for fact in facts if fact["category"] in categories]
         row = {"file_name": paper.get("file_name")}
         row.update({field: paper.get(field) for field in fields})
         if not row.get("sample_size") and sample_facts:
@@ -41,6 +41,8 @@ def extractive_summary(paper: dict[str, Any], max_sentences: int = 8) -> dict[st
                 continue
             for sentence in page.get("text", "").splitlines():
                 sentence = sentence.strip()
+                if "�" in sentence:
+                    continue
                 if sentence and sentence not in selected:
                     selected.append(sentence)
                     evidence.append({"evidence_quote": sentence, "source_file": paper.get("file_name"),
