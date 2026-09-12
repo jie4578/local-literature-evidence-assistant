@@ -31,6 +31,7 @@ class PipelineConfig:
     repair_attempts: int = 1
     max_reduce_rounds: int = 8
     hard_request_limit: int | None = None
+    purpose_label_scan_pages: int = 2
 
     def __post_init__(self):
         if self.chunk_size_chars + self.chunk_prompt_overhead_chars > self.model_input_budget_chars:
@@ -267,6 +268,34 @@ def _normalize_evidence_text(text: str) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
 
 
+def extract_labeled_purpose(pages: Iterable[PageText], config: PipelineConfig | None = None) -> dict[str, Any] | None:
+    """仅从前 N 个页面的明确标签提取研究目的，不根据语义猜测。"""
+    config = config or PipelineConfig()
+    label = re.compile(r"^\s*(?:Research purpose|Purpose|Objective|Objectives|Aim|Aims|研究目的|目的|研究目标|目标)\s*[:：]\s*(.*)$", re.IGNORECASE)
+    page_list = list(pages)[:config.purpose_label_scan_pages]
+    for page in page_list:
+        lines = page.text.splitlines()
+        for index, line in enumerate(lines):
+            match = label.match(line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            quote = line.strip()
+            if not value:
+                for next_line in lines[index + 1:]:
+                    if next_line.strip():
+                        value = next_line.strip()
+                        quote = next_line.strip()
+                        break
+            if value and not _has_document_instruction(value):
+                return {"research_purpose": value, "evidence_quote": quote,
+                        "source_file": page.source_file, "pdf_page_start": page.page_number,
+                        "pdf_page_end": page.page_number, "evidence_type": "purpose",
+                        "source": "deterministic_label", "verified": True,
+                        "location_status": "exact"}
+    return None
+
+
 def verify_evidence(evidence: dict[str, Any], chunk_text: str) -> dict[str, Any]:
     source = _normalize_evidence_text(chunk_text)
     quote = _normalize_evidence_text(evidence.get("evidence_quote", ""))
@@ -352,7 +381,7 @@ PAPER_DEFAULTS = {
     "research_object": None, "sample_size": None, "research_methods": [],
     "statistical_methods": None, "major_results": [], "innovations": [],
     "limitations": [], "conclusion": None, "keywords": [], "evidence": [],
-    "warnings": [], "errors": [],
+    "warnings": [], "errors": [], "quality_flags": [],
 }
 REVIEW_DEFAULTS = {
     "research_theme_overview": None, "major_methods": [], "common_conclusions": [],
@@ -496,6 +525,13 @@ def analyze_paper_file(client: Any, file_path: str | Path, config: PipelineConfi
     paper["evidence"] = _dedupe_evidence(evidence)
     paper["warnings"] = list(dict.fromkeys(paper.get("warnings", []) + [w for x in chunk_results for w in x["analysis"].get("warnings", [])]))
     paper["errors"] = list(dict.fromkeys(paper.get("errors", []) + [e for x in chunk_results for e in x["analysis"].get("errors", [])]))
+    if not paper.get("research_purpose"):
+        labeled_purpose = extract_labeled_purpose(pages, config)
+        if labeled_purpose:
+            paper["research_purpose"] = labeled_purpose.pop("research_purpose")
+            paper["evidence"] = _dedupe_evidence(paper["evidence"] + [{"claim": paper["research_purpose"], **labeled_purpose}])
+        else:
+            paper["quality_flags"] = list(dict.fromkeys(paper.get("quality_flags", []) + ["研究目的未明确说明或未能提取"]))
     if save_dir:
         save_json(save_dir / f"{safe_name(path.stem)}_analysis.json", paper)
     return paper
