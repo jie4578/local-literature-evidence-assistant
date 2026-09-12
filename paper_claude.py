@@ -26,6 +26,7 @@ from paper_pipeline import PipelineConfig, run_batch
 from exporters import export_csv, export_excel, export_json, export_word
 from local_extractor import extract_local_paper
 from local_summary import compare_papers, extractive_summary
+from local_search import LocalSearchIndex
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
@@ -232,9 +233,11 @@ def process_local_papers(pdf_files, progress=gr.Progress()):
     task_dir = os.path.join("output", f"local_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}")
     os.makedirs(task_dir, exist_ok=False)
     papers = []
+    local_index = LocalSearchIndex(os.path.join("output", "local_index.sqlite"))
     for index, path in enumerate(paths, 1):
         progress(index / max(1, len(paths)), desc=f"本地解析 {index}/{len(paths)}")
         papers.append(extract_local_paper(path))
+        local_index.index_pages(papers[-1].get("pages", []))
     comparison = compare_papers(papers)
     export_json(papers, os.path.join(task_dir, "local_papers.json"))
     export_json(comparison, os.path.join(task_dir, "comparison.json"))
@@ -253,6 +256,16 @@ def process_local_papers(pdf_files, progress=gr.Progress()):
             lines.append("摘取式摘要：")
             lines.extend(f"- {sentence}" for sentence in summary["sentences"])
     return "\n".join(lines), str(output_path)
+
+
+def search_local_index(query, limit=20):
+    """查询本地 SQLite 索引；不访问网络。"""
+    if not query or not query.strip():
+        return "请输入关键词或精确短语。"
+    rows = LocalSearchIndex(os.path.join("output", "local_index.sqlite")).search(query, limit=limit)
+    if not rows:
+        return "未找到匹配内容。"
+    return "\n\n".join(f"{row['source_file']} · PDF 第 {row['page_number']} 页\n{row['snippet']}" for row in rows)
 
 
 def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress()):
@@ -420,12 +433,17 @@ def build_ui():
                     visible=True,
                 )
 
+                local_query = gr.Textbox(label="本地证据搜索", placeholder="关键词或精确短语（仅搜索本地索引）")
+                local_search_btn = gr.Button("🔎 搜索本地证据")
+                local_search_output = gr.Textbox(label="本地搜索结果", lines=8)
+
         # 绑定事件
         submit_btn.click(
             fn=process_papers,
             inputs=[pdf_input, api_key_input, mode_input],
             outputs=[result_text, docx_output],
         )
+        local_search_btn.click(search_local_index, inputs=[local_query], outputs=[local_search_output])
 
     return demo
 
