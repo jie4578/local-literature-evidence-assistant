@@ -23,6 +23,9 @@ from docx.oxml.ns import qn
 from openai import OpenAI
 import gradio as gr
 from paper_pipeline import PipelineConfig, run_batch
+from exporters import export_csv, export_excel, export_json, export_word
+from local_extractor import extract_local_paper
+from local_summary import compare_papers, extractive_summary
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
@@ -221,8 +224,42 @@ def save_docx(title, content, output_path):
 #  Gradio 处理函数
 # ============================================================
 
-def process_papers(pdf_files, api_key, progress=gr.Progress()):
+def process_local_papers(pdf_files, progress=gr.Progress()):
+    """本地离线解析：不创建 DeepSeek 客户端、不访问网络。"""
+    if not pdf_files:
+        return "❌ 请上传至少一个 PDF 文件", None
+    paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
+    task_dir = os.path.join("output", f"local_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}")
+    os.makedirs(task_dir, exist_ok=False)
+    papers = []
+    for index, path in enumerate(paths, 1):
+        progress(index / max(1, len(paths)), desc=f"本地解析 {index}/{len(paths)}")
+        papers.append(extract_local_paper(path))
+    comparison = compare_papers(papers)
+    export_json(papers, os.path.join(task_dir, "local_papers.json"))
+    export_json(comparison, os.path.join(task_dir, "comparison.json"))
+    export_csv(comparison, os.path.join(task_dir, "comparison.csv"))
+    export_excel(comparison, os.path.join(task_dir, "comparison.xlsx"))
+    output_path = export_word(comparison, os.path.join(task_dir, "comparison.docx"))
+    lines = ["模式：Local Offline", f"本地结果目录：{task_dir}"]
+    for paper in papers:
+        lines.append(f"\n📄 {paper['file_name']}：{len(paper.get('pages', []))} 页，{len(paper.get('facts', []))} 条规则证据")
+        if paper.get("errors"):
+            lines.extend(f"错误：{error}" for error in paper["errors"])
+        if paper.get("warnings"):
+            lines.extend(f"警告：{warning}" for warning in paper["warnings"])
+        summary = extractive_summary(paper)
+        if summary["sentences"]:
+            lines.append("摘取式摘要：")
+            lines.extend(f"- {sentence}" for sentence in summary["sentences"])
+    return "\n".join(lines), str(output_path)
+
+
+def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress()):
     """主处理函数：接收上传的PDF，返回综述文本和Word文件"""
+
+    if mode == "Local Offline":
+        return process_local_papers(pdf_files, progress)
 
     # 验证输入 — 优先用网页输入的 Key，没填则尝试环境变量
     if not api_key or not api_key.strip():
@@ -317,7 +354,7 @@ def build_ui():
         gr.HTML("""
         <div class="header">
             <h1>🧬 科研文献智能分析系统</h1>
-            <p>上传 PDF 论文 → AI 自动分析 → 一键生成文献综述 Word 文档</p>
+            <p>上传 PDF 论文 → 本地解析或可选 AI 分析 → 结构化结果导出</p>
         </div>
         """)
 
@@ -326,6 +363,11 @@ def build_ui():
             with gr.Column(scale=1):
                 gr.Markdown("### ⚙️ 配置")
 
+                mode_input = gr.Radio(
+                    ["Local Offline", "DeepSeek AI"], value="Local Offline",
+                    label="运行模式", info="默认仅使用本地确定性功能，不访问网络"
+                )
+
                 api_key_input = gr.Textbox(
                     label="DeepSeek API Key",
                     placeholder="your_api_key_here",
@@ -333,7 +375,7 @@ def build_ui():
                     info="在 platform.deepseek.com 获取"
                 )
 
-                gr.HTML('<div class="tip-box">💡 上传的论文文本将发送至 DeepSeek API 进行分析，请勿上传涉密、敏感或未授权材料。<br>也可设置环境变量 <b>DEEPSEEK_API_KEY</b> 免重复输入</div>')
+                gr.HTML('<div class="tip-box">💡 可选功能：论文文本将发送至 DeepSeek API。请勿上传涉密、敏感或未授权材料。<br>Local Offline 模式不需要 API Key，也不访问网络。</div>')
 
                 gr.Markdown("### 📂 上传论文")
 
@@ -346,17 +388,17 @@ def build_ui():
                 gr.HTML('<div class="tip-box">📌 支持同时上传多篇论文，自动批量分析后生成综合综述</div>')
 
                 submit_btn = gr.Button(
-                    "🚀 开始分析",
+                    "🚀 开始处理",
                     variant="primary",
                     size="lg"
                 )
 
                 gr.Markdown("### 📖 使用说明")
                 gr.Markdown("""
-1. 填入 DeepSeek API Key
+1. 默认选择 Local Offline，无需 API Key
 2. 上传一篇或多篇 PDF 论文
-3. 点击「开始分析」
-4. 等待完成后下载 Word 文档
+3. 点击「开始处理」查看本地解析和结构化对比
+4. 如主动选择 DeepSeek AI，再填写 API Key
 
 > ⚠️ 仅支持**文字版 PDF**，扫描版图片 PDF 无法读取
                 """)
@@ -381,7 +423,7 @@ def build_ui():
         # 绑定事件
         submit_btn.click(
             fn=process_papers,
-            inputs=[pdf_input, api_key_input],
+            inputs=[pdf_input, api_key_input, mode_input],
             outputs=[result_text, docx_output],
         )
 

@@ -13,3 +13,5 @@ output/
 *.log
 ~$*
 *.docx
+*.sqlite
+*.db
