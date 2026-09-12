@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -63,18 +64,50 @@ class LocalSearchIndex:
     def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         if not query.strip():
             return []
+        special_pattern = self._statistical_pattern(query)
+        if special_pattern is not None:
+            return self._search_pattern(special_pattern, limit)
         if self.fts5_available:
             if query.startswith('"') and query.endswith('"'):
                 match = query
             else:
                 tokens = re.findall(r"[\w\u4e00-\u9fff]+", query)
                 match = " AND ".join(tokens)
-            rows = self.conn.execute("SELECT source_file,page_number,text FROM pages_fts WHERE pages_fts MATCH ? LIMIT ?", (match, limit)).fetchall()
+            if not match:
+                return []
+            try:
+                rows = self.conn.execute("SELECT source_file,page_number,text FROM pages_fts WHERE pages_fts MATCH ? LIMIT ?", (match, limit)).fetchall()
+            except sqlite3.OperationalError:
+                return []
         else:
             terms = [term for term in query.strip('"').split() if term]
+            if not terms:
+                return []
             condition = " AND ".join("text LIKE ?" for _ in terms)
-            rows = self.conn.execute(f"SELECT source_file,page_number,text FROM pages_fallback WHERE {condition} LIMIT ?", tuple(f"%{term}%" for term in terms) + (limit,)).fetchall()
+            try:
+                rows = self.conn.execute(f"SELECT source_file,page_number,text FROM pages_fallback WHERE {condition} LIMIT ?", tuple(f"%{term}%" for term in terms) + (limit,)).fetchall()
+            except sqlite3.OperationalError:
+                return []
         return [{"source_file": row[0], "page_number": row[1], "snippet": row[2]} for row in rows]
+
+    @staticmethod
+    def _statistical_pattern(query: str) -> re.Pattern[str] | None:
+        normalized = unicodedata.normalize("NFKC", query).strip()
+        if re.search(r"(?i)\bp\s*(?:[-\u2010-\u2015\u2212]?\s*value|值)", normalized):
+            return re.compile(r"(?i)\bp\s*(?:(?:[-\u2010-\u2015\u2212]?\s*value)|值|[<>=≤≥]\s*0?\.\d+)")
+        match = re.search(r"(?i)\bp\s*([<>=≤≥])\s*(0?\.\d+)", normalized)
+        if match:
+            operator, number = re.escape(match.group(1)), re.escape(match.group(2))
+            return re.compile(rf"(?i)\bp\s*{operator}\s*{number}")
+        return None
+
+    def _search_pattern(self, pattern: re.Pattern[str], limit: int) -> list[dict[str, Any]]:
+        table = "pages_fts" if self.fts5_available else "pages_fallback"
+        try:
+            rows = self.conn.execute(f"SELECT source_file,page_number,text FROM {table}").fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [{"source_file": row[0], "page_number": row[1], "snippet": row[2]} for row in rows if pattern.search(row[2])][:limit]
 
     def clear(self, confirm: bool = False) -> None:
         if not confirm:

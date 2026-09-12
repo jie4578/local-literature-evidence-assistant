@@ -245,7 +245,7 @@ def process_local_papers(pdf_files, progress=gr.Progress()):
     export_excel(comparison, os.path.join(task_dir, "comparison.xlsx"))
     output_path = export_word(comparison, os.path.join(task_dir, "comparison.docx"))
     lines = ["模式：Local Offline", f"本地结果目录：{task_dir}"]
-    lines.append("提示：本地规则提取暂不能稳定区分正文、表格标题和表格内容，重要结果请根据 PDF 页码回查原文。")
+    lines.append("提示：本地规则提取暂不能稳定区分正文、表格标题和表格内容，重要结果请根据 PDF 页码回查原文。摘取式摘要仅选取原句，不代表 AI 生成或事实核验。")
     for paper in papers:
         lines.append(f"\n📄 {paper['file_name']}：{len(paper.get('pages', []))} 页，{len(paper.get('facts', []))} 条规则证据")
         if paper.get("errors"):

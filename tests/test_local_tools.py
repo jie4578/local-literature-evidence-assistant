@@ -72,12 +72,28 @@ def test_local_search_fts_duplicate_update_phrase_and_clear(tmp_path):
     index.clear(confirm=True)
 
 
+def test_local_search_supports_statistical_p_value_variants(tmp_path):
+    pages = [PageText("stats.pdf", 1, "The p = 0.003 and P<0.05 findings were significant.", 48, False),
+             PageText("stats.pdf", 2, "The p-value was reported with p\u202f<\u202f0.001.", 45, False),
+             PageText("stats.pdf", 3, "统计结果 p值显著。", 12, False)]
+    index = LocalSearchIndex(tmp_path / "stats.sqlite")
+    index.index_pages(pages)
+    assert index.search("p value")
+    assert index.search("p-value")
+    assert index.search("p值")
+    assert index.search("p = 0.003")
+    assert index.search("p < 0.001")
+    assert index.search("P<0.05")
+    assert index.search("alpha") == []
+
+
 def test_offline_summary_and_exports_are_structured(tmp_path):
     paper = extract_local_paper(make_local_pdf(tmp_path / "paper.pdf"))
     rows = compare_papers([paper])
     assert rows[0]["file_name"] == "paper.pdf"
     summary = extractive_summary(paper)
     assert summary["summary_type"] == "extractive"
+    assert summary["description"].startswith("摘取式摘要")
     assert all(sentence in "\n".join(page["text"] for page in paper["pages"]) for sentence in summary["sentences"])
     json_path = export_json(rows, tmp_path / "中文.json")
     csv_path = export_csv(rows, tmp_path / "comparison.csv")
@@ -85,6 +101,28 @@ def test_offline_summary_and_exports_are_structured(tmp_path):
     docx_path = export_word(rows, tmp_path / "comparison.docx")
     assert json.loads(json_path.read_text(encoding="utf-8"))[0]["file_name"] == "paper.pdf"
     assert all(path.exists() for path in (csv_path, xlsx_path, docx_path))
+
+
+def test_extractive_summary_uses_sections_and_excludes_front_matter():
+    paper = {
+        "file_name": "paper.pdf",
+        "pages": [{"page_number": 1, "text": "RESEARCH ARTICLE\nOpen Access\nSplit\nTitle\nAlice Author\nUniversity\nAbstract\nWe evaluated the treatment purpose in adults."},
+                   {"page_number": 2, "text": "Methods\nThis randomized controlled trial included 120 participants.\nResults\nThe result was significant with p = 0.003.\nConclusion\nThe treatment improved outcomes."}],
+        "sections": {
+            "abstract": {"title": "Abstract", "text": "We evaluated the treatment purpose in adults.", "page_start": 1, "page_end": 1},
+            "methods": {"title": "Methods", "text": "This randomized controlled trial included 120 participants.", "page_start": 2, "page_end": 2},
+            "results": {"title": "Results", "text": "The result was significant with p = 0.003.", "page_start": 2, "page_end": 2},
+            "conclusion": {"title": "Conclusion", "text": "The treatment improved outcomes.", "page_start": 2, "page_end": 2},
+        },
+    }
+    summary = extractive_summary(paper)
+    joined = " ".join(summary["sentences"])
+    assert "RESEARCH ARTICLE" not in joined and "Open Access" not in joined
+    assert "Alice Author" not in joined and "University" not in joined
+    assert any("purpose" in sentence for sentence in summary["sentences"])
+    assert any("randomized" in sentence for sentence in summary["sentences"])
+    assert any("p = 0.003" in sentence for sentence in summary["sentences"])
+    assert all(item["verified"] and item["pdf_pages"] for item in summary["evidence"])
 
 
 def test_raw_and_display_evidence_are_separate_and_raw_is_exact():
