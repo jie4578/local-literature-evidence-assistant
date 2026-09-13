@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from openai import OpenAI
 
-from .base import LLMProvider, ProviderConfig, ProviderError, sanitize_error
+from .base import LLMProvider, ProviderConfig, ProviderError, ProviderResponse, sanitize_error
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -19,6 +19,8 @@ class OpenAICompatibleProvider(LLMProvider):
         parsed = urlparse(self.config.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ProviderError("Base URL 无效：必须使用 HTTP(S) 地址")
+        if parsed.username is not None or parsed.password is not None:
+            raise ProviderError("Base URL 不允许包含用户名或密码")
         if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
             raise ProviderError("安全限制：远程 HTTP 地址被拒绝，仅允许 localhost 或 127.0.0.1")
         if not self.config.model.strip():
@@ -41,24 +43,52 @@ class OpenAICompatibleProvider(LLMProvider):
                 raise ProviderError(f"无法初始化 {self.config.provider_name} 客户端：{sanitize_error(exc, self.config.api_key)}") from exc
         return self._client
 
-    def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+    def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> ProviderResponse:
         try:
+            max_output_tokens = kwargs.get(
+                "max_output_tokens",
+                self.config.output_budgets.reduce_max_output_tokens,
+            )
+            if not isinstance(max_output_tokens, int) or max_output_tokens <= 0:
+                raise ProviderError("输出 Token 上限必须是正整数，不能静默忽略")
             response = self.client.chat.completions.create(
                 model=self.config.model,
                 messages=messages,
                 temperature=kwargs.get("temperature", 0.2),
                 timeout=kwargs.get("timeout", self.config.timeout),
+                max_tokens=max_output_tokens,
             )
-            return response.choices[0].message.content or ""
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            usage = getattr(response, "usage", None)
+            result = ProviderResponse(
+                content=content,
+                finish_reason=getattr(choice, "finish_reason", None),
+                input_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
+                output_tokens=getattr(usage, "completion_tokens", None) if usage else None,
+                total_tokens=getattr(usage, "total_tokens", None) if usage else None,
+                response_chars=len(content),
+                provider_request_id=getattr(response, "id", None),
+                model=getattr(response, "model", None) or self.config.model,
+            )
+            if result.finish_reason == "length":
+                raise ProviderError(
+                    "output_limit_reached：模型输出达到 Token 上限，响应可能不完整",
+                    code="output_limit_reached",
+                    response=result,
+                )
+            return result
+        except ProviderError:
+            raise
         except Exception as exc:
             text = sanitize_error(exc, self.config.api_key)
             lowered = text.casefold()
             if "401" in lowered or "unauthorized" in lowered:
-                raise ProviderError(f"{self.config.provider_name} 认证失败（401），请检查 API Key") from exc
+                raise ProviderError(f"{self.config.provider_name} 认证失败（401），请检查 API Key", code="auth_error") from exc
             if "429" in lowered or "rate limit" in lowered:
-                raise ProviderError(f"{self.config.provider_name} 请求被限流或余额不足（429）") from exc
+                raise ProviderError(f"{self.config.provider_name} 请求被限流或余额不足（429）", code="rate_limit") from exc
             if "timeout" in lowered or "timed out" in lowered:
-                raise ProviderError(f"{self.config.provider_name} 连接超时") from exc
+                raise ProviderError(f"{self.config.provider_name} 连接超时", code="timeout") from exc
             if "model" in lowered and ("not found" in lowered or "does not exist" in lowered):
-                raise ProviderError(f"模型不存在或不可用：{self.config.model}") from exc
-            raise ProviderError(f"{self.config.provider_name} 调用失败：{text}") from exc
+                raise ProviderError(f"模型不存在或不可用：{self.config.model}", code="model_not_found") from exc
+            raise ProviderError(f"{self.config.provider_name} 调用失败：{text}", code="provider_request_error") from exc
