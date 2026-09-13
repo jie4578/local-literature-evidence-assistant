@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+from scientific_facts import repair_visual_word_breaks
+
 
 LANGUAGE_OPTIONS = ("原文", "中文摘要＋英文证据（推荐）", "中英对照")
 
@@ -13,7 +15,7 @@ def compare_papers(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """生成不改写原文的对比行，并在回填后再计算 missing_fields。"""
     rows = []
     fields = ("title_candidate", "author_candidate", "year_candidate", "doi", "research_object", "sample_size")
-    method_order = ("randomization", "double_blind", "control_group", "group_count")
+    method_order = ("research_method", "randomization", "double_blind", "control_group", "group_count")
 
     def normalized(value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -88,13 +90,10 @@ def compare_papers(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 method_keywords.append(keyword)
         row.update({
             "research_methods_keywords": method_keywords,
-            "experimental_conditions": [
-                value for value in quotes(facts, {"temperature", "time", "concentration", "dose"})
-                if value
-            ],
-            "statistical_information": quotes(facts, {"p_value", "confidence_interval", "mean_sd"}),
+            "experimental_conditions": quotes(facts, {"temperature", "time", "concentration", "dose"}, {"abstract", "methods"}),
+            "statistical_information": quotes(facts, {"p_value", "confidence_interval", "mean_sd"}, {"abstract", "methods", "results"}),
             "major_results_original": quotes(facts, {"major_result"}, {"results"}),
-            "conclusion_original": quotes(facts, {"conclusion"}, {"conclusion", "discussion"}),
+            "conclusion_original": quotes(facts, {"conclusion"}, {"abstract", "conclusion", "discussion"}),
             "limitations_original": quotes(facts, {"limitation"}, {"discussion", "conclusion", "results"}),
             "source_pages": sorted({(f["pdf_page_start"], f["pdf_page_end"]) for f in facts if f.get("pdf_page_start")}),
             "missing_fields": [],
@@ -105,7 +104,7 @@ def compare_papers(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _normalize_space(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+    return repair_visual_word_breaks(re.sub(r"\s+", " ", value).strip())
 
 
 def _normalize_for_match(value: str) -> str:
@@ -203,13 +202,17 @@ def _looks_incomplete_fragment(sentence: str) -> bool:
 
 
 def _find_raw_match(target: str, raw_text: str) -> str | None:
-    normalized_target = _normalize_for_match(target)
-    tokens = [token for token in re.split(r"\s+", normalized_target) if token]
-    if tokens:
-        pattern = r"\s+".join(re.escape(token) for token in tokens)
-        match = re.search(pattern, raw_text, flags=re.DOTALL)
-        if match:
-            return match.group(0)
+    target_forms = [_normalize_for_match(target)]
+    for fixed, broken in (("increased", "i ncreased"), ("pattern", "p attern")):
+        if fixed in target.casefold():
+            target_forms.append(_normalize_for_match(re.sub(fixed, broken, target, flags=re.IGNORECASE)))
+    for normalized_target in dict.fromkeys(target_forms):
+        tokens = [token for token in re.split(r"\s+", normalized_target) if token]
+        if tokens:
+            pattern = r"\s+".join(re.escape(token) for token in tokens)
+            match = re.search(pattern, raw_text, flags=re.DOTALL | re.IGNORECASE)
+            if match:
+                return match.group(0)
     for raw_part in _raw_quote_candidates(raw_text):
         if _normalize_for_match(raw_part) == normalized_target:
             return raw_part
@@ -253,11 +256,11 @@ def _score_sentence(sentence: str, section_name: str) -> int:
     return sum(1 for term in terms.get(section_name, ()) if term in lowered)
 
 
-def extractive_summary(paper: dict[str, Any], max_sentences: int = 8) -> dict[str, Any]:
+def extractive_summary(paper: dict[str, Any], max_sentences: int = 6) -> dict[str, Any]:
     selected: list[str] = []
     evidence: list[dict[str, Any]] = []
     sections = paper.get("sections", {})
-    quotas = (("abstract", 2), ("methods", 2), ("results", 2), ("conclusion", 1), ("introduction", 1), ("discussion", 1))
+    quotas = (("abstract", 1), ("methods", 1), ("results", 2), ("conclusion", 1), ("discussion", 1))
     for name, quota in quotas:
         section = sections.get(name, {})
         if not section or not section.get("text"):

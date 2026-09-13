@@ -16,13 +16,27 @@ RULES = {
     "p_value": r"\bp\s*[<=>]\s*0?\.\d+\b",
     "confidence_interval": r"\b(?:95%\s*)?(?:CI|confidence interval)\s*[:=]?\s*\(?\s*[-\d.]+\s*(?:to|–|-|,)\s*[-\d.]+\s*\)?",
     "mean_sd": r"\b(?:mean|average)\s*(?:±|\+/-)\s*|\b\d+(?:\.\d+)?\s*±\s*\d+(?:\.\d+)?",
+    "research_method": r"\b(?:model\s+fit(?:ting)?|goodness\s+of\s+fit|fit(?:ting)?\s+criteria|convergence\s+criteria|cut[- ]off\s+thresholds?|nonlinear\s+mixed[- ]effects|two[- ]compartment\s+model)\b",
     "randomization": r"\b(?:randomized|randomised|randomization|randomisation)\b",
     "double_blind": r"\bdouble[- ]blind(?:ed)?\b",
     "control_group": r"\bcontrol\s+group\b|\bplacebo\s+group\b",
-    "major_result": r"\b(?:significant|increased|decreased|higher|lower|retained|improved|reduced|greater)\b",
-    "limitation": r"\b(?:limitation|limited by|single laboratory|single[- ]center|small sample|short duration)\b",
+    "major_result": r"\b(?:significant|increased|decreased|higher|lower|retained|improved|reduced|greater|unchanged|no change|remained|unaffected|stable)\b",
+    "limitation": r"\b(?:limitation|limited by|preliminary|replication|larger sample|single laboratory|single[- ]center|small sample|short duration)\b",
     "conclusion": r"\b(?:we conclude|in conclusion|concluded that|showed greater|demonstrated)\b",
 }
+
+
+VISUAL_WORD_REPAIRS = (
+    (re.compile(r"\bi\s+ncreased\b", re.IGNORECASE), "increased"),
+    (re.compile(r"\bp\s+attern\b", re.IGNORECASE), "pattern"),
+)
+
+
+def repair_visual_word_breaks(value: str) -> str:
+    """仅修复已知的视觉断词；不改写 raw_text。"""
+    for pattern, replacement in VISUAL_WORD_REPAIRS:
+        value = pattern.sub(replacement, value)
+    return value
 
 
 def _sentences(text: str) -> Iterable[str]:
@@ -61,27 +75,28 @@ def extract_scientific_facts(pages: Iterable[Any]) -> list[dict[str, Any]]:
         display_text = page.get("display_text", page.get("text", "")) if isinstance(page, dict) else page.text
         raw_text = page.get("raw_text", page.get("text", "")) if isinstance(page, dict) else page.text
         for sentence in _sentences(display_text):
-            normalized_sentence = re.sub(r"\s+", " ", sentence).strip()
+            display_sentence = repair_visual_word_breaks(sentence)
+            normalized_sentence = re.sub(r"\s+", " ", display_sentence).strip()
             # 出版标签、标题、作者和单位可能与下一段连成一个视觉句子；
             # 不把这类首屏前置信息当作科研事实。原始页面仍完整保留。
             if front_matter_prefix.match(normalized_sentence):
                 continue
             for category, pattern in RULES.items():
-                if re.search(pattern, sentence, flags=re.IGNORECASE):
+                if re.search(pattern, display_sentence, flags=re.IGNORECASE):
                     raw_quote = _raw_quote_for_display(sentence, raw_text)
                     if not raw_quote:
                         continue
                     quality_flags = ["replacement_character"] if "�" in raw_quote else []
-                    if sentence.rstrip().endswith("-"):
+                    if display_sentence.rstrip().endswith("-"):
                         quality_flags.append("unresolved_line_break_hyphen")
                     if re.match(r"(?i)^(?:table|fig(?:ure)?|图|表)\s*\d", normalized_sentence):
                         source_type = "possible_table"
-                    elif sentence.strip() == sentence.strip().title() and len(sentence.split()) <= 8:
+                    elif display_sentence.strip() == display_sentence.strip().title() and len(display_sentence.split()) <= 8:
                         source_type = "heading"
                     else:
                         source_type = "unknown"
-                    facts.append({"category": category, "evidence_quote": sentence,
-                                  "evidence_quote_display": sentence, "evidence_quote_raw": raw_quote,
+                    facts.append({"category": category, "evidence_quote": display_sentence,
+                                  "evidence_quote_display": display_sentence, "evidence_quote_raw": raw_quote,
                                   "source_file": page.get("source_file") if isinstance(page, dict) else page.source_file,
                                   "pdf_page_start": page.get("page_number") if isinstance(page, dict) else page.page_number,
                                   "pdf_page_end": page.get("page_number") if isinstance(page, dict) else page.page_number,

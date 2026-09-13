@@ -7,14 +7,14 @@ import pytest
 from docx import Document
 from openpyxl import load_workbook
 
-from exporters import export_csv, export_excel, export_json, export_word
+from exporters import _major_results, export_csv, export_excel, export_json, export_word
 from bilingual import translate_paper_for_display
 from local_extractor import _clean_page_text, extract_local_paper
 from local_search import LocalSearchIndex
 from local_summary import compare_papers, extractive_summary
 from paper_pipeline import PageText
 from section_parser import parse_sections
-from scientific_facts import extract_scientific_facts
+from scientific_facts import extract_scientific_facts, repair_visual_word_breaks
 
 
 def make_local_pdf(path: Path) -> Path:
@@ -283,3 +283,56 @@ def test_word_report_uses_compact_columns_and_merges_duplicate_evidence(tmp_path
     with ZipFile(path) as archive:
         xml = archive.read("word/document.xml")
     assert b"w:wordWrap" in xml and b"w:eastAsia" in xml
+
+
+def test_fact_classification_and_display_word_repairs_are_conservative():
+    pages = [{"source_file": "paper.pdf", "page_number": 3,
+              "raw_text": "Model fitting criteria used a goodness of fit threshold. The biomarker i ncreased significantly. The control value remained unchanged. Results are preliminary and require replication in larger sample studies.",
+              "text": "Model fitting criteria used a goodness of fit threshold. The biomarker i ncreased significantly. The control value remained unchanged. Results are preliminary and require replication in larger sample studies.",
+              "display_text": "Model fitting criteria used a goodness of fit threshold. The biomarker i ncreased significantly. The control value remained unchanged. Results are preliminary and require replication in larger sample studies."}]
+    facts = extract_scientific_facts(pages)
+    by_category = {fact["category"]: fact for fact in facts}
+    assert "research_method" in by_category
+    assert "major_result" in by_category
+    assert "limitation" in by_category
+    major_results = [fact for fact in facts if fact["category"] == "major_result"]
+    assert any("increased" in fact["evidence_quote_display"] for fact in major_results)
+    assert any("i ncreased" in fact["evidence_quote_raw"] for fact in major_results)
+    assert repair_visual_word_breaks("double-blind and single-dose") == "double-blind and single-dose"
+
+
+def test_word_report_uses_chinese_labels_and_mode_specific_notice(tmp_path):
+    evidence = [{"category": "time", "evidence_quote_raw": "The study lasted 8 weeks.", "evidence_quote_display": "The study lasted 8 weeks.", "pdf_page_start": 2, "pdf_page_end": 2, "verified": True, "source_type": "unknown", "quality_flags": []},
+                {"category": "p", "evidence_quote_raw": "The result had p = 0.003.", "evidence_quote_display": "The result had p = 0.003.", "pdf_page_start": 3, "pdf_page_end": 3, "verified": True, "source_type": "unknown", "quality_flags": []},
+                {"category": "conclusion", "evidence_quote_raw": "The treatment improved outcomes.", "evidence_quote_display": "The treatment improved outcomes.", "pdf_page_start": 4, "pdf_page_end": 4, "verified": True, "source_type": "unknown", "quality_flags": []}]
+    paper = {"file_name": "trial.pdf", "title_candidate": "Trial", "facts": evidence, "extractive_summary": {"evidence": []}}
+    rows = compare_papers([paper])
+    local = Document(export_word(rows, tmp_path / "local.docx", papers=[paper], report_mode="Local Offline"))
+    local_text = "\n".join([p.text for p in local.paragraphs] + [cell.text for table in local.tables for row in table.rows for cell in row.cells])
+    assert "当前为 Local Offline 报告" in local_text
+    assert "当前报告未启用语义翻译" not in local_text
+    assert "时间条件" in local_text and "统计结果" in local_text and "研究结论" in local_text
+    assert "source_type" not in local_text and "major_result" not in local_text
+
+    translated = dict(paper)
+    translated["facts"] = [dict(evidence[0], evidence_quote_zh="研究持续了8周。", translation_status="success")]
+    translated_rows = compare_papers([translated])
+    bilingual = Document(export_word(translated_rows, tmp_path / "bilingual.docx", papers=[translated], report_mode="中英对照"))
+    bilingual_text = "\n".join([p.text for p in bilingual.paragraphs] + [cell.text for table in bilingual.tables for row in table.rows for cell in row.cells])
+    assert "中文译文" in bilingual_text
+    assert "当前报告包含可选机器翻译" in bilingual_text
+
+
+def test_report_results_are_limited_to_complete_short_sentences():
+    paper = {"extractive_summary": {"evidence": [
+        {"section_key": "results", "text": "A complete result was significant.", "verified": True, "quality_flags": []},
+        {"section_key": "results", "text": "The result was p < .001 (Fig.", "verified": True, "quality_flags": []},
+        {"section_key": "results", "text": "The result was compared", "verified": True, "quality_flags": []},
+        {"section_key": "results", "text": "A second complete result improved outcomes.", "verified": True, "quality_flags": []},
+        {"section_key": "results", "text": "A third complete result remained stable.", "verified": True, "quality_flags": []},
+        {"section_key": "results", "text": "A fourth complete result increased outcomes.", "verified": True, "quality_flags": []},
+    ]}}
+    values = _major_results(paper, {})
+    assert len(values) == 3
+    assert all(len(value) <= 300 and value.endswith(".") for value in values)
+    assert all("Fig." not in value and not value.endswith("compared") for value in values)

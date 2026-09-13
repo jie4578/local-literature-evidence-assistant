@@ -18,16 +18,19 @@ from docx.shared import Inches, Pt, RGBColor
 
 DISPLAY_LABELS = {
     "sample_size": "样本量",
+    "time": "时间条件",
+    "p": "统计结果",
+    "p_value": "统计结果",
+    "research_method": "研究方法",
     "group_count": "分组数量",
     "randomization": "随机化",
     "double_blind": "双盲",
     "control_group": "对照组",
-    "p_value": "p 值",
     "confidence_interval": "置信区间",
     "mean_sd": "均值 ± 标准差",
     "major_result": "主要结果",
     "limitation": "局限性",
-    "conclusion": "结论",
+    "conclusion": "研究结论",
     "immunocapture_lc_ms": "免疫捕获 LC-MS",
     "affinity_purification_lc_ms": "亲和纯化 LC-MS",
     "single_dose_pk": "单次给药 PK",
@@ -246,7 +249,13 @@ def _paper_evidence(paper: dict[str, Any], row: dict[str, Any]) -> list[dict[str
             continue
         raw = item.get("evidence_quote_raw", item.get("evidence_quote", ""))
         display = item.get("evidence_quote_display", item.get("evidence_quote", raw))
-        if re.match(r"^(?:research article|open access|original article|article|plos one)\b", re.sub(r"\s+", " ", str(display)).strip(), re.IGNORECASE):
+        compact = re.sub(r"\s+", " ", str(display)).strip()
+        lowered = compact.casefold()
+        if item.get("section") in {"references", "introduction"}:
+            continue
+        if re.match(r"^(?:research article|open access|original article|article|plos one|keywords?|correspondence|copyright|funding|author contributions|competing interests?)\b", compact, re.IGNORECASE):
+            continue
+        if "@" in compact or "doi.org/" in lowered or re.search(r"\b(?:university|department|institute|school of)\b", lowered):
             continue
         pages = tuple(item.get("pdf_pages") or ([item.get("pdf_page_start")] if item.get("pdf_page_start") else []))
         key = (raw, pages)
@@ -276,7 +285,7 @@ def _paper_evidence(paper: dict[str, Any], row: dict[str, Any]) -> list[dict[str
     return result
 
 
-def _complete_sentences(values: Any, limit: int) -> list[str]:
+def _complete_sentences(values: Any, limit: int, max_chars: int = 300) -> list[str]:
     if isinstance(values, str):
         values = [values]
     result = []
@@ -284,7 +293,9 @@ def _complete_sentences(values: Any, limit: int) -> list[str]:
         text = re.sub(r"\s+", " ", str(value or "")).strip()
         if not text or "\ufffd" in text:
             continue
-        if re.search(r"(?:^|\s)(?:p\s*[<=>]\s*\.\d+|fig(?:ure)?\s*\d+[-–—]?)\s*$", text, re.IGNORECASE):
+        if len(text) > max_chars:
+            continue
+        if re.search(r"(?:fig(?:ure)?\.?|p\s*[<=>]\s*\.?\d*)\s*$", text, re.IGNORECASE):
             continue
         if re.search(r"(?:[-–—]|\b(?:significantly|compared|than|of|and|or|with|to|from|in|for|the|a|an|on|by|as))$", text, re.IGNORECASE):
             continue
@@ -307,14 +318,14 @@ def _major_results(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
     values = [item.get("text") for item in _paper_summary_items(paper, "results")]
     if not values:
         values = row.get("major_results_original", [])
-    return _complete_sentences(values, 3)
+    return _complete_sentences(values, 3, 300)
 
 
 def _limitations(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
     values = [item.get("text") for item in _paper_summary_items(paper, "discussion") + _paper_summary_items(paper, "conclusion")]
     if not values:
         values = row.get("limitations_original", [])
-    return _complete_sentences(values, 2)
+    return _complete_sentences(values, 2, 300)
 
 
 def _conclusions(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
@@ -331,7 +342,7 @@ def _conclusions(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
         return value
     ranked = sorted(candidates, key=lambda item: (-score(item), len(item.get("text", ""))))
     values = [item.get("text") for item in ranked if score(item) > 0] or [item.get("text") for item in candidates] or row.get("conclusion_original", [])
-    return _complete_sentences(values, 1)
+    return _complete_sentences(values, 1, 300)
 
 
 def _research_object_display(value: Any) -> Any:
@@ -399,7 +410,11 @@ def export_word(
     _set_no_mid_word_breaks(meta)
     meta_run = meta.add_run(f"生成模式：{report_mode}　论文数量：{len(rows)}")
     _set_run_font(meta_run, size=9, color="666666")
-    explanation = document.add_paragraph("证据中的英文原文和 PDF 物理页码由程序保留；verified 仅表示原文匹配，不代表科研结论已被证明。当前报告未启用语义翻译。跨平台查看需要可用的 Microsoft YaHei 或其他中文字体。")
+    if report_mode == "Local Offline":
+        notice = "当前为 Local Offline 报告，未启用语义翻译；英文证据原文和 PDF 物理页码已保留。verified 仅表示原文匹配，不代表科研结论已被证明。"
+    else:
+        notice = "当前报告包含可选机器翻译，仅供阅读；英文证据原文、PDF 物理页码和 verified 状态保持不变。"
+    explanation = document.add_paragraph(notice)
     _set_no_mid_word_breaks(explanation)
     for run in explanation.runs:
         _set_run_font(run, size=9)
@@ -481,13 +496,13 @@ def export_word(
             categories = item.get("_merged_categories") or [item.get("category", item.get("evidence_type"))]
             type_text = "、".join(str(_display_token(category) or "其他证据") for category in dict.fromkeys(categories))
             type_page = f"{type_text}\nPDF 第 {page_text or '未知'} 页"
-            quality = [_display_token(flag) for flag in (item.get("quality_flags") or [])]
+            quality = [_display_token(flag) for flag in (item.get("quality_flags") or [])] or "无异常"
             if has_translation:
                 evidence_rows.append([type_page, item.get("evidence_quote_zh") or "未提供中文译文", item.get("evidence_quote_display", item.get("evidence_quote", item.get("evidence_quote_raw"))), "已验证" if item.get("verified") is True else "未验证，请回查原文", quality])
             else:
                 evidence_rows.append([type_page, item.get("evidence_quote_display", item.get("evidence_quote", item.get("evidence_quote_raw"))), "已验证" if item.get("verified") is True else "未验证，请回查原文", quality])
         evidence_headers = ["类型与页码", "中文译文", "英文证据原文", "验证状态", "质量提示"] if has_translation else ["类型与页码", "英文证据原文", "验证状态", "质量提示"]
-        evidence_widths = [0.9, 1.5, 3.55, 0.7, 0.55] if has_translation else [0.9, 4.9, 0.75, 0.65]
+        evidence_widths = [0.9, 1.5, 3.9, 0.6, 0.3] if has_translation else [1.3, 4.1, 0.86, 0.94]
         _add_table(document, evidence_headers, evidence_rows, evidence_widths)
         # rows-only 是旧调用兼容路径；保留一份可被普通段落读取的原文，
         # 同时证据表仍是用户报告的主要呈现形式。
