@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from zipfile import ZipFile
 
 import fitz
 import pytest
@@ -7,6 +8,7 @@ from docx import Document
 from openpyxl import load_workbook
 
 from exporters import export_csv, export_excel, export_json, export_word
+from bilingual import translate_paper_for_display
 from local_extractor import _clean_page_text, extract_local_paper
 from local_search import LocalSearchIndex
 from local_summary import compare_papers, extractive_summary
@@ -125,6 +127,18 @@ def test_extractive_summary_uses_sections_and_excludes_front_matter():
     assert all(item["verified"] and item["pdf_pages"] for item in summary["evidence"])
 
 
+def test_publication_front_matter_is_not_rule_evidence():
+    pages = [{
+        "source_file": "paper.pdf", "page_number": 1,
+        "raw_text": "RESEARCH ARTICLE\nOpen Access\nA randomised controlled trial of diet improvement.\nFelice N. Jacka\nAbstract\nWe randomised 67 participants.",
+        "text": "RESEARCH ARTICLE\nOpen Access\nA randomised controlled trial of diet improvement.\nFelice N. Jacka\nAbstract\nWe randomised 67 participants.",
+        "display_text": "RESEARCH ARTICLE\nOpen Access\nA randomised controlled trial of diet improvement.\nFelice N. Jacka\nAbstract\nWe randomised 67 participants.",
+    }]
+    facts = extract_scientific_facts(pages)
+    assert all("RESEARCH ARTICLE" not in fact["evidence_quote_display"] for fact in facts)
+    assert all("Open Access" not in fact["evidence_quote_display"] for fact in facts)
+
+
 def test_raw_and_display_evidence_are_separate_and_raw_is_exact():
     pages = [{"source_file": "a.pdf", "page_number": 1, "text": "admin-\nistration result", "raw_text": "admin-\nistration result", "display_text": "administration result"}]
     facts = extract_scientific_facts(pages)
@@ -173,3 +187,99 @@ def test_local_mode_does_not_create_deepseek_client(monkeypatch, tmp_path):
     result, output = paper_claude.process_local_papers([str(file_path)])
     assert "Local Offline" in result
     assert output and Path(output).exists()
+
+
+def test_research_object_is_conservative_and_keeps_page_evidence(tmp_path):
+    path = tmp_path / "objects.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "A monkey pharmacokinetic (PK) studies report on MAB1.")
+    doc.new_page().insert_text((72, 72), "Adults with major depression joined the trial.")
+    doc.save(path)
+    doc.close()
+    first = extract_local_paper(path)
+    assert first["research_object"] == "monkey pharmacokinetic (PK) studies"
+    assert first["research_object_pdf_page"] == 1
+
+
+def test_compare_repairs_cross_line_sample_and_deduplicates_methods():
+    paper = {
+        "file_name": "trial.pdf", "title_candidate": "Trial", "author_candidate": "Author",
+        "year_candidate": 2024, "doi": "10.1234/trial", "research_object": "adults",
+        "facts": [
+            {"category": "sample_size", "evidence_quote_display": "We enrolled 67 participants (intervention, n = 33; control,", "pdf_page_start": 1, "pdf_page_end": 1, "source_type": "unknown"},
+            {"category": "sample_size", "evidence_quote_display": "n = 34).", "pdf_page_start": 1, "pdf_page_end": 1, "source_type": "unknown"},
+            {"category": "sample_size", "evidence_quote_display": "Table 1 Total (n = 67) intervention (n = 33) control (n = 34)", "pdf_page_start": 1, "pdf_page_end": 1, "source_type": "possible_table"},
+            {"category": "randomization"}, {"category": "randomization"}, {"category": "control_group"},
+        ],
+        "sections": {"methods": {"text": "A randomized controlled trial."}},
+    }
+    row = compare_papers([paper])[0]
+    assert "67" in row["sample_size"] and "n = 33" in row["sample_size"] and "n = 34" in row["sample_size"]
+    assert "sample_size" not in row["missing_fields"]
+    assert row["research_methods_keywords"].count("randomization") == 1
+
+
+def test_summary_excludes_incomplete_fragments_and_keeps_verified_evidence():
+    paper = {
+        "pages": [{"page_number": 1, "raw_text": "Results\nComplete result was significant.\nThe dietary support group demonstrated significantly\nFigs 4–", "text": "Results\nComplete result was significant.\nThe dietary support group demonstrated significantly\nFigs 4–", "display_text": "Results\nComplete result was significant.\nThe dietary support group demonstrated significantly\nFigs 4–"}],
+        "sections": {"results": {"title": "Results", "text": "Complete result was significant.\nThe dietary support group demonstrated significantly\nFigs 4–", "page_start": 1, "page_end": 1}},
+    }
+    summary = __import__("local_summary").extractive_summary(paper)
+    assert summary["sentences"] == ["Complete result was significant."]
+    assert summary["evidence"][0]["verified"] is True
+
+
+class TranslationProvider:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def generate(self, messages, **kwargs):
+        self.calls.append(kwargs)
+        from providers import ProviderResponse
+        return ProviderResponse.from_legacy_string(self.response)
+
+
+def test_translation_is_bounded_and_preserves_statistics():
+    paper = {"title_candidate": "Trial", "sample_size": "67 participants, p = 0.003", "evidence": [{"evidence_quote_display": "67 participants, p = 0.003", "verified": True, "pdf_page_start": 2}]}
+    provider = TranslationProvider('{"translations":{"title_candidate":"试验","sample_size":"67名参与者，p = 0.003","evidence_0":"67名参与者，p = 0.003"}}')
+    outcome = translate_paper_for_display(provider, paper)
+    assert outcome["status"] == "success"
+    assert paper["sample_size_zh"] == "67名参与者，p = 0.003"
+    assert paper["evidence"][0]["translation_status"] == "success"
+    assert provider.calls[0]["max_output_tokens"] > 0
+
+
+def test_translation_failure_keeps_english_fallback():
+    paper = {"sample_size": "67 participants, p = 0.003", "evidence": [{"evidence_quote_display": "67 participants, p = 0.003", "verified": True}]}
+    provider = TranslationProvider('{"translations":{"sample_size":"六十七名参与者"}}')
+    outcome = translate_paper_for_display(provider, paper)
+    assert outcome["status"] == "failed"
+    assert "sample_size_zh" not in paper
+    assert paper["evidence"][0]["translation_status"] == "failed"
+
+
+def test_word_report_has_comparison_and_evidence_tables_without_internal_fields(tmp_path):
+    paper = {"file_name": "trial.pdf", "title_candidate": "Trial", "author_candidate": "Author", "year_candidate": 2024, "doi": "10.1234/trial", "research_object": "adults", "sample_size": "67 participants", "facts": [{"category": "sample_size", "evidence_quote_raw": "67 participants", "evidence_quote_display": "67 participants", "pdf_page_start": 2, "pdf_page_end": 2, "verified": True, "source_type": "body", "quality_flags": []}], "extractive_summary": {"sentences": ["67 participants"]}}
+    rows = compare_papers([paper])
+    path = export_word(rows, tmp_path / "report.docx", papers=[paper])
+    document = Document(path)
+    xml_text = "\n".join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+    assert len(document.tables) >= 3
+    assert "类型与页码" in xml_text and "PDF 第 2 页" in xml_text
+    assert "research_object" not in xml_text and "None" not in xml_text and "[]" not in xml_text
+
+
+def test_word_report_uses_compact_columns_and_merges_duplicate_evidence(tmp_path):
+    shared = {"evidence_quote_raw": "The study included 67 participants.", "evidence_quote_display": "The study included 67 participants.", "pdf_page_start": 2, "pdf_page_end": 2, "verified": True, "source_type": "body", "quality_flags": []}
+    first = {"file_name": "one.pdf", "title_candidate": "One", "facts": [dict(shared, category="sample_size"), dict(shared, category="major_result")], "extractive_summary": {"evidence": []}}
+    second = {"file_name": "two.pdf", "title_candidate": "Two", "facts": [dict(shared, category="sample_size")], "extractive_summary": {"evidence": []}}
+    rows = compare_papers([first, second])
+    path = export_word(rows, tmp_path / "compact.docx", papers=[first, second])
+    document = Document(path)
+    assert len(document.tables[0].columns) == 3
+    assert [len(table.columns) for table in document.tables[2::2]] == [4, 4]
+    assert document.tables[2].rows.__len__() == 2  # header + one merged evidence row
+    with ZipFile(path) as archive:
+        xml = archive.read("word/document.xml")
+    assert b"w:wordWrap" in xml and b"w:eastAsia" in xml

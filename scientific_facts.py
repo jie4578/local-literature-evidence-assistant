@@ -26,7 +26,10 @@ RULES = {
 
 
 def _sentences(text: str) -> Iterable[str]:
-    for part in re.split(r"(?<=[.!?。！？])\s+|\n+", text):
+    # PyMuPDF 的视觉换行不一定代表句子边界；先重建连续文本，
+    # 再按真实标点切句，避免样本量或统计句子被拆成残片。
+    joined = re.sub(r"[ \t]*\r?\n[ \t]*", " ", text)
+    for part in re.split(r"(?<=[.!?。！？])\s+", joined):
         value = part.strip()
         if value:
             yield value
@@ -34,6 +37,13 @@ def _sentences(text: str) -> Iterable[str]:
 
 def _raw_quote_for_display(display_sentence: str, raw_text: str) -> str | None:
     normalized_target = re.sub(r"\s+", " ", display_sentence).strip()
+    # 返回 raw_text 中的真实子串，允许只在定位时跨越原始换行。
+    tokens = [token for token in re.split(r"\s+", normalized_target) if token]
+    if tokens:
+        pattern = r"\s+".join(re.escape(token) for token in tokens)
+        match = re.search(pattern, raw_text, flags=re.DOTALL)
+        if match:
+            return match.group(0)
     for candidate in _sentences(raw_text):
         normalized_candidate = re.sub(r"\s+", " ", candidate).strip()
         if normalized_target in normalized_candidate or normalized_candidate in normalized_target:
@@ -43,10 +53,19 @@ def _raw_quote_for_display(display_sentence: str, raw_text: str) -> str | None:
 
 def extract_scientific_facts(pages: Iterable[Any]) -> list[dict[str, Any]]:
     facts = []
+    front_matter_prefix = re.compile(
+        r"^(?:research article|open access|original article|article|plos one)\b",
+        re.IGNORECASE,
+    )
     for page in pages:
         display_text = page.get("display_text", page.get("text", "")) if isinstance(page, dict) else page.text
         raw_text = page.get("raw_text", page.get("text", "")) if isinstance(page, dict) else page.text
         for sentence in _sentences(display_text):
+            normalized_sentence = re.sub(r"\s+", " ", sentence).strip()
+            # 出版标签、标题、作者和单位可能与下一段连成一个视觉句子；
+            # 不把这类首屏前置信息当作科研事实。原始页面仍完整保留。
+            if front_matter_prefix.match(normalized_sentence):
+                continue
             for category, pattern in RULES.items():
                 if re.search(pattern, sentence, flags=re.IGNORECASE):
                     raw_quote = _raw_quote_for_display(sentence, raw_text)
@@ -55,7 +74,12 @@ def extract_scientific_facts(pages: Iterable[Any]) -> list[dict[str, Any]]:
                     quality_flags = ["replacement_character"] if "�" in raw_quote else []
                     if sentence.rstrip().endswith("-"):
                         quality_flags.append("unresolved_line_break_hyphen")
-                    source_type = "heading" if sentence.strip() == sentence.strip().title() and len(sentence.split()) <= 8 else "unknown"
+                    if re.match(r"(?i)^(?:table|fig(?:ure)?|图|表)\s*\d", normalized_sentence):
+                        source_type = "possible_table"
+                    elif sentence.strip() == sentence.strip().title() and len(sentence.split()) <= 8:
+                        source_type = "heading"
+                    else:
+                        source_type = "unknown"
                     facts.append({"category": category, "evidence_quote": sentence,
                                   "evidence_quote_display": sentence, "evidence_quote_raw": raw_quote,
                                   "source_file": page.get("source_file") if isinstance(page, dict) else page.source_file,
