@@ -1,5 +1,7 @@
 # Local-First Literature Evidence Assistant
 
+当前版本：`0.3.0-bilingual-report-preview`
+
 一个支持离线 PDF 提取、科研事实识别、原文页码追溯、本地全文检索和多格式导出的文献证据整理工具。
 
 ## 功能状态
@@ -27,6 +29,15 @@ Local Offline 已通过两篇公开真实 PDF 验收，适合 Limited Local Pilo
 - 多论文结构化对比；
 - JSON、CSV、Excel、Word 导出；
 - 可选 DeepSeek、OpenAI、Ollama 和 Custom OpenAI-Compatible Provider。
+
+## 双语报告与语言模式
+
+- `Local Offline` 是默认模式，不需要 API Key；报告使用中文字段名，同时保留英文证据原文、PDF 物理页码和 `verified` 状态；
+- `原文` 模式适合直接回查英文论文；
+- `中文摘要＋英文证据` 和 `中英对照` 只在用户主动选择并使用 AI Provider 时提供可选机器翻译；
+- 中文译文仅供阅读，不改变英文原文、页码或 `verified`；翻译失败时保留英文；
+- Word 报告包含基础信息、结构化概览、摘取式摘要和关键证据，可用于人工复核和求职展示；
+- Local Offline 报告会明确标注“未启用语义翻译”，不会把规则提取描述为 AI 综述。
 
 ## 隐私与可信边界
 
@@ -89,7 +100,7 @@ docs/images/          README 截图位置
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-当前版本测试结果：95 passed。测试不调用真实 DeepSeek API。
+当前版本测试结果：116 passed。测试不调用真实 DeepSeek API。
 
 ## 技术亮点
 

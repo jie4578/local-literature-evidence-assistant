@@ -24,8 +24,9 @@ import gradio as gr
 from paper_pipeline import PipelineConfig, run_batch
 from providers import DEFAULT_OUTPUT_TOKEN_BUDGETS, ProviderError, create_provider, provider_defaults, provider_names, sanitize_error
 from exporters import export_csv, export_excel, export_json, export_word
+from bilingual import translate_paper_for_display, translated_paper_text
 from local_extractor import extract_local_paper
-from local_summary import compare_papers, extractive_summary
+from local_summary import LANGUAGE_OPTIONS, compare_papers, extractive_summary, offline_language_notice
 from local_search import LocalSearchIndex
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
@@ -221,7 +222,7 @@ def save_docx(title, content, output_path):
 #  Gradio 处理函数
 # ============================================================
 
-def process_local_papers(pdf_files, progress=gr.Progress()):
+def process_local_papers(pdf_files, progress=gr.Progress(), result_language="中文摘要＋英文证据（推荐）"):
     """本地离线解析：不创建 DeepSeek 客户端、不访问网络。"""
     if not pdf_files:
         return "❌ 请上传至少一个 PDF 文件", None
@@ -234,24 +235,37 @@ def process_local_papers(pdf_files, progress=gr.Progress()):
         progress(index / max(1, len(paths)), desc=f"本地解析 {index}/{len(paths)}")
         papers.append(extract_local_paper(path))
         local_index.index_pages(papers[-1].get("pages", []))
+    summaries = []
+    for paper in papers:
+        summary = extractive_summary(paper)
+        paper["extractive_summary"] = summary
+        summaries.append(summary)
     comparison = compare_papers(papers)
     export_json(papers, os.path.join(task_dir, "local_papers.json"))
     export_json(comparison, os.path.join(task_dir, "comparison.json"))
     export_csv(comparison, os.path.join(task_dir, "comparison.csv"))
     export_excel(comparison, os.path.join(task_dir, "comparison.xlsx"))
-    output_path = export_word(comparison, os.path.join(task_dir, "comparison.docx"))
-    lines = ["模式：Local Offline", f"本地结果目录：{task_dir}"]
+    output_path = export_word(comparison, os.path.join(task_dir, "literature_analysis.docx"), papers=papers, report_mode="Local Offline")
+    lines = ["模式：Local Offline", f"结果语言：{result_language}", offline_language_notice(result_language), f"本地结果目录：{task_dir}"]
     lines.append("提示：本地规则提取暂不能稳定区分正文、表格标题和表格内容，重要结果请根据 PDF 页码回查原文。摘取式摘要仅选取原句，不代表 AI 生成或事实核验。")
     for paper in papers:
         lines.append(f"\n📄 {paper['file_name']}：{len(paper.get('pages', []))} 页，{len(paper.get('facts', []))} 条规则证据")
+        lines.append(f"标题：{paper.get('title_candidate') or '未提取到'}；作者：{paper.get('author_candidate') or '未提取到'}；年份：{paper.get('year_candidate') or '未提取到'}")
+        lines.append(f"研究对象：{paper.get('research_object') or '未提取到'}；样本量：{paper.get('sample_size') or '未提取到'}")
+        methods = compare_papers([paper])[0].get("research_methods_keywords", [])
+        method_labels = {"research_method": "研究方法", "model_fit": "模型拟合", "r_square": "模型拟合", "immunocapture_lc_ms": "免疫捕获 LC-MS", "affinity_purification_lc_ms": "亲和纯化 LC-MS", "single_dose_pk": "单次给药 PK", "multiple_dose_pk": "多次给药 PK", "randomized_controlled_trial": "随机对照试验", "dietary_intervention": "饮食干预", "randomization": "随机化", "double_blind": "双盲", "control_group": "对照组", "group_count": "分组数量"}
+        lines.append(f"研究方法：{'; '.join(method_labels.get(method, method) for method in methods) or '未提取到'}")
         if paper.get("errors"):
             lines.extend(f"错误：{error}" for error in paper["errors"])
         if paper.get("warnings"):
             lines.extend(f"警告：{warning}" for warning in paper["warnings"])
-        summary = extractive_summary(paper)
+        summary = paper.get("extractive_summary") or extractive_summary(paper)
         if summary["sentences"]:
             lines.append("摘取式摘要：")
-            lines.extend(f"- {sentence}" for sentence in summary["sentences"])
+            for item in summary.get("evidence", []):
+                status = "已验证" if item.get("verified") else "未验证，请回查原文"
+                pages = "、".join(str(page) for page in item.get("pdf_pages", [])) or "未知"
+                lines.append(f"- [{item.get('section', '未标明章节')} · PDF 第 {pages} 页 · {status}] {item.get('text', '')}")
     return "\n".join(lines), str(output_path)
 
 
@@ -265,11 +279,11 @@ def search_local_index(query, limit=20):
     return "\n\n".join(f"{row['source_file']} · PDF 第 {row['page_number']} 页\n{row['snippet']}" for row in rows)
 
 
-def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provider_name="DeepSeek", model="", base_url=""):
+def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provider_name="DeepSeek", model="", base_url="", result_language="中文摘要＋英文证据（推荐）"):
     """主处理函数：接收上传的PDF，返回综述文本和Word文件"""
 
     if mode == "Local Offline":
-        return process_local_papers(pdf_files, progress)
+        return process_local_papers(pdf_files, progress, result_language)
 
     try:
         defaults = provider_defaults(provider_name)
@@ -295,18 +309,35 @@ def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provid
     log_lines = []
     paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
     progress(0.05, desc="正在进行分页提取与分段分析...")
+    pipeline_config = PipelineConfig(failure_policy="fail_fast")
     pipeline_result = run_batch(
         client,
         paths,
         output_root="output",
-        config=PipelineConfig(failure_policy="fail_fast"),
+        config=pipeline_config,
     )
     success_count = sum(not paper.get("errors") for paper in pipeline_result.papers)
     fail_count = len(pipeline_result.papers) - success_count
     for paper in pipeline_result.papers:
         log_lines.append(f"📄 {paper.get('file_name', '未知文件')}：{paper.get('chunk_count', 0)} 个分块")
+    if result_language != "原文":
+        translated = 0
+        failed = 0
+        for paper in pipeline_result.papers:
+            if paper.get("analysis_status") == "complete":
+                translation = translate_paper_for_display(client, paper, pipeline_config)
+                translated += translation.get("translated_fields", 0) + translation.get("translated_evidence", 0)
+                failed += int(translation.get("status") == "failed")
+        if translated:
+            log_lines.append(f"🌐 中文展示已生成：{translated} 项；英文证据和页码保持不变。")
+        if failed:
+            log_lines.append("⚠️ 部分翻译未通过数字/统计信息一致性检查，已回退显示英文原文。")
+        export_json(pipeline_result.papers, pipeline_result.task_dir / "papers_bilingual.json")
     progress(0.85, desc="正在整理结构化文献综述...")
     review = _review_to_text(pipeline_result.final_review)
+    translated_lines = [line for paper in pipeline_result.papers for line in translated_paper_text(paper)]
+    if translated_lines:
+        review += "\n\n**中文展示**\n" + "\n".join(f"- {line}" for line in translated_lines)
     log_lines.append(f"\n📝 综述处理完成（成功 {success_count} 篇，存在警告/错误 {fail_count} 篇）")
     log_lines.append(f"📁 中间结果：{pipeline_result.task_dir}")
 
@@ -314,8 +345,10 @@ def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provid
     progress(0.95, desc="正在生成 Word 文档...")
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(str(pipeline_result.task_dir), f"文献综述_{timestamp}.docx")
-        save_docx("文献综述", review, output_path)
+        output_path = os.path.join(str(pipeline_result.task_dir), f"literature_analysis_{timestamp}.docx")
+        report_rows = compare_papers(pipeline_result.papers)
+        export_word(report_rows, output_path, papers=pipeline_result.papers,
+                    report_mode=f"AI Provider / {provider_name}", final_review=pipeline_result.final_review)
         log_lines.append(f"✅ Word 文档已生成")
     except Exception as e:
         return f"❌ Word 生成失败: {e}", None
@@ -355,7 +388,14 @@ def _review_to_text(review):
             continue
         lines.append(f"**{label}**")
         if isinstance(value, list):
-            lines.extend(f"- {item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)}" for item in value)
+            for item in value:
+                if isinstance(item, dict):
+                    claim = item.get("claim") or item.get("text") or "未提取到"
+                    page = item.get("pdf_page_start") or (item.get("pdf_pages") or [None])[0]
+                    verified = "已验证" if item.get("verified") is True else "未验证，请回查原文"
+                    lines.append(f"- {claim}（PDF 第 {page or '未知'} 页，{verified}）")
+                else:
+                    lines.append(f"- {item}")
         else:
             lines.append(str(value))
     if review.get("warnings"):
@@ -404,6 +444,11 @@ def build_ui():
                     label="运行模式", info="默认仅使用本地确定性功能，不访问网络"
                 )
 
+                result_language_input = gr.Radio(
+                    list(LANGUAGE_OPTIONS), value="中文摘要＋英文证据（推荐）",
+                    label="结果语言", info="Local Offline 不进行语义翻译，始终保留英文证据原文"
+                )
+
                 provider_input = gr.Dropdown(
                     provider_names(), value="DeepSeek", label="AI Provider", visible=False
                 )
@@ -450,28 +495,28 @@ def build_ui():
             # 右侧：输出区
             with gr.Column(scale=2):
                 gr.Markdown("### 📊 分析结果")
-
-                result_text = gr.Textbox(
-                    label="分析进度 & 综述内容",
-                    lines=25,
-                    max_lines=40,
-                    placeholder="点击「开始分析」后，这里会显示实时进度和综述内容...",
-                    
-                )
-
-                docx_output = gr.File(
-                    label="📥 下载 Word 文档",
-                    visible=True,
-                )
-
-                local_query = gr.Textbox(label="本地证据搜索", placeholder="关键词或精确短语（仅搜索本地索引）")
-                local_search_btn = gr.Button("🔎 搜索本地证据")
-                local_search_output = gr.Textbox(label="本地搜索结果", lines=8)
+                with gr.Tabs():
+                    with gr.Tab("综合概览"):
+                        result_text = gr.Textbox(
+                            label="处理进度与结构化结果",
+                            lines=25,
+                            max_lines=40,
+                            placeholder="点击「开始分析」后，这里会显示处理进度和结果概览...",
+                        )
+                    with gr.Tab("证据与页码"):
+                        gr.Markdown("已验证：证据文本与 PDF 原文匹配；未验证：请根据 PDF 物理页码回查原文。source_type 仅表示程序对来源形态的保守判断。")
+                    with gr.Tab("本地搜索"):
+                        local_query = gr.Textbox(label="本地证据搜索", placeholder="关键词或精确短语（仅搜索本地索引）")
+                        local_search_btn = gr.Button("🔎 搜索本地证据")
+                        local_search_output = gr.Textbox(label="本地搜索结果", lines=8)
+                    with gr.Tab("导出结果"):
+                        docx_output = gr.File(label="📥 下载 Word 文档", visible=True)
+                        gr.Markdown("JSON、CSV、Excel 和 Word 会保存到本次任务的本地结果目录。")
 
         # 绑定事件
         submit_btn.click(
             fn=process_papers,
-            inputs=[pdf_input, api_key_input, mode_input, provider_input, model_input, base_url_input],
+            inputs=[pdf_input, api_key_input, mode_input, provider_input, model_input, base_url_input, result_language_input],
             outputs=[result_text, docx_output],
         )
         def update_ai_visibility(mode):

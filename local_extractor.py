@@ -25,7 +25,7 @@ def _valid_title(value: str | None) -> bool:
     if not value:
         return False
     clean = re.sub(r"\s+", " ", value).strip(" -")
-    return bool(clean and clean.casefold() not in GENERIC_MARKERS and not DOI_RE.search(clean) and "open access" not in clean.casefold())
+    return bool(clean and "�" not in clean and clean.casefold() not in GENERIC_MARKERS and not DOI_RE.search(clean) and "open access" not in clean.casefold())
 
 
 def _clean_page_text(raw: str, repeated_lines: set[str]) -> tuple[str, list[str]]:
@@ -61,8 +61,13 @@ def _metadata(path: Path, pages: list[Any]) -> dict[str, Any]:
         first_page = doc[0]
         blocks = first_page.get_text("dict").get("blocks", [])
         first_lines = [line.strip() for page in pages[:2] for line in page.text.splitlines() if line.strip()]
-        title = metadata.get("title") if _valid_title(metadata.get("title")) else None
-        title_source, title_confidence = ("pdf_metadata", 0.98) if title else (None, 0.0)
+        raw_metadata_title = metadata.get("title") or None
+        display_metadata_title = raw_metadata_title.replace("\ufffd", "") if raw_metadata_title else None
+        title = display_metadata_title if _valid_title(display_metadata_title) else None
+        title_source, title_confidence = (
+            ("pdf_metadata", 0.98) if title and display_metadata_title == raw_metadata_title
+            else ("pdf_metadata_display_sanitized", 0.9) if title else (None, 0.0)
+        )
         if not title:
             candidates = []
             for block in blocks:
@@ -92,11 +97,60 @@ def _metadata(path: Path, pages: list[Any]) -> dict[str, Any]:
         metadata_year = re.search(r"\b((?:19|20)\d{2})\b", metadata.get("creationDate", ""))
         year_match = published or citation or metadata_year
         year_source = "published_date" if published else ("citation" if citation else ("pdf_metadata" if metadata_year else None))
-        return {"title_candidate": title, "title_source": title_source, "title_confidence": title_confidence,
+        return {"title_candidate": title, "title_candidate_raw": raw_metadata_title,
+                "title_source": title_source, "title_confidence": title_confidence,
                 "author_candidate": author_value, "author_source": author_source, "author_confidence": author_confidence,
                 "year_candidate": int(year_match.group(1)) if year_match else None, "year_source": year_source,
                 "year_confidence": 0.98 if published else (0.9 if citation else (0.75 if metadata_year else 0.0)),
                 "doi": (DOI_RE.search(metadata.get("subject", "")) or DOI_RE.search(joined)).group(0).rstrip(".,)") if (DOI_RE.search(metadata.get("subject", "")) or DOI_RE.search(joined)) else None}
+
+
+def _raw_regex_match(pattern: str, pages: list[dict[str, Any]]) -> tuple[str, int] | None:
+    """在前几页的 raw_text 中定位明确短语，返回原文片段和物理页码。"""
+    compiled = re.compile(pattern, re.IGNORECASE | re.DOTALL)
+    for page in pages:
+        match = compiled.search(page.get("raw_text", page.get("text", "")))
+        if match:
+            return match.group(0), page["page_number"]
+    return None
+
+
+def _research_object(pages: list[dict[str, Any]], scan_pages: int = 2) -> dict[str, Any]:
+    """只从前几页明确出现的研究对象短语中提取，不根据文件名或结论猜测。"""
+    candidates = pages[:max(1, scan_pages)]
+    rules = (
+        (r"\bmonkey\s+pharmacokinetic(?:\s*\(\s*PK\s*\))?\s+stud(?:y|ies)\b", 0.94),
+        (r"\badults?\s+with\s+major\s+depression\b", 0.96),
+        (r"\bmoderate\s+to\s+severe\s+depression\b", 0.86),
+    )
+    for pattern, confidence in rules:
+        match = _raw_regex_match(pattern, candidates)
+        if match:
+            value = re.sub(r"\s+", " ", match[0]).strip()
+            return {
+                "research_object": value,
+                "research_object_source": "deterministic_rule",
+                "research_object_confidence": confidence,
+                "research_object_evidence_quote_raw": match[0],
+                "research_object_pdf_page": match[1],
+            }
+    return {"research_object": None, "research_object_source": None, "research_object_confidence": 0.0}
+
+
+def _assign_fact_sections(facts: list[dict[str, Any]], sections: dict[str, dict[str, Any]]) -> None:
+    """用原文片段与已识别章节做保守关联，供对比和摘要过滤。"""
+    normalize = lambda value: re.sub(r"\s+", " ", value or "").strip().casefold()
+    for fact in facts:
+        quote = normalize(fact.get("evidence_quote_display", fact.get("evidence_quote", "")))
+        matches = []
+        for kind, section in sections.items():
+            section_text = normalize(section.get("text", ""))
+            if quote and quote in section_text:
+                matches.append((section.get("page_start", 0), kind))
+        if matches:
+            fact["section"] = sorted(matches, key=lambda item: item[0], reverse=True)[0][1]
+        else:
+            fact["section"] = "unknown"
 
 
 def extract_local_paper(file_path: str | Path, config: PipelineConfig | None = None) -> dict[str, Any]:
@@ -124,6 +178,8 @@ def extract_local_paper(file_path: str | Path, config: PipelineConfig | None = N
     result.update(_metadata(path, pages))
     result["sections"] = parse_sections(page_dicts)
     result["facts"] = extract_scientific_facts(page_dicts)
+    _assign_fact_sections(result["facts"], result["sections"])
+    result.update(_research_object(page_dicts, getattr(config or PipelineConfig(), "purpose_label_scan_pages", 2)))
     empty_pages = [page.page_number for page in pages if page.is_empty]
     if empty_pages:
         result["warnings"].append(f"第 {','.join(map(str, empty_pages))} 页无可提取文字，可能是扫描页")
