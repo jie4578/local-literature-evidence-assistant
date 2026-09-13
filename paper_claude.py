@@ -20,9 +20,9 @@ from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-from openai import OpenAI
 import gradio as gr
 from paper_pipeline import PipelineConfig, run_batch
+from providers import ProviderError, create_provider, provider_defaults, provider_names, sanitize_error
 from exporters import export_csv, export_excel, export_json, export_word
 from local_extractor import extract_local_paper
 from local_summary import compare_papers, extractive_summary
@@ -34,15 +34,13 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
 # ║  配置区域                                  ║
 # ╚═══════════════════════════════════════════╝
 
-API_BASE_URL = "https://api.deepseek.com"
-AI_MODEL = "deepseek-chat"
-
 # ============================================================
 #  核心功能函数（复用原有逻辑）
 # ============================================================
 
-def get_client(api_key):
-    return OpenAI(api_key=api_key, base_url=API_BASE_URL)
+def get_client(api_key, provider_name="DeepSeek", model=None, base_url=None):
+    """兼容旧入口，但实际返回统一 LLMProvider。"""
+    return create_provider(provider_name, model=model, base_url=base_url, api_key=api_key)
 
 
 def read_pdf(file_path):
@@ -68,15 +66,9 @@ def call_ai(client, messages, temperature=0.3, max_retries=2):
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            res = client.chat.completions.create(
-                model=AI_MODEL,
-                messages=messages,
-                temperature=temperature,
-                timeout=60
-            )
-            return res.choices[0].message.content
+            return client.generate(messages, temperature=temperature, timeout=60)
         except Exception as e:
-            last_error = e
+            last_error = sanitize_error(e, getattr(getattr(client, "config", None), "api_key", None))
             if attempt < max_retries:
                 time.sleep((attempt + 1) * 3)
             else:
@@ -269,23 +261,32 @@ def search_local_index(query, limit=20):
     return "\n\n".join(f"{row['source_file']} · PDF 第 {row['page_number']} 页\n{row['snippet']}" for row in rows)
 
 
-def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress()):
+def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provider_name="DeepSeek", model="", base_url=""):
     """主处理函数：接收上传的PDF，返回综述文本和Word文件"""
 
     if mode == "Local Offline":
         return process_local_papers(pdf_files, progress)
 
-    # 验证输入 — 优先用网页输入的 Key，没填则尝试环境变量
-    if not api_key or not api_key.strip():
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key or not api_key.strip():
-        return "❌ 请先填写 DeepSeek API Key，或在环境变量中设置 DEEPSEEK_API_KEY", None
-
+    try:
+        defaults = provider_defaults(provider_name)
+    except ProviderError as exc:
+        return f"❌ {exc}", None
+    resolved_key = api_key.strip() if api_key and api_key.strip() else os.environ.get(defaults.get("env_key")) if defaults.get("env_key") else None
+    if provider_name != "Ollama" and not (resolved_key or "").strip():
+        env_name = defaults.get("env_key")
+        suffix = f"，或在环境变量中设置 {env_name}" if env_name else ""
+        return f"❌ 请先填写 {provider_name} API Key{suffix}", None
     if not pdf_files:
         return "❌ 请上传至少一个 PDF 文件", None
 
-    api_key = api_key.strip()
-    client = get_client(api_key)
+    try:
+        client = get_client(api_key, provider_name=provider_name, model=model, base_url=base_url)
+    except ProviderError as exc:
+        if "缺少" in str(exc):
+            env_name = defaults.get("env_key")
+            suffix = f"，或在环境变量中设置 {env_name}" if env_name else ""
+            return f"❌ 请先填写 {provider_name} API Key{suffix}", None
+        return f"❌ {sanitize_error(exc, api_key)}", None
 
     log_lines = []
     paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
@@ -315,6 +316,18 @@ def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress()):
     # 返回综述文本 + Word 文件路径
     result_text = "\n".join(log_lines) + "\n\n" + "="*50 + "\n\n" + review
     return result_text, output_path
+
+
+def test_provider_connection(provider_name, model, base_url, api_key):
+    """只发送最小健康检查，不发送论文文本。"""
+    if provider_name == "Local Offline":
+        return "Local Offline 不需要连接测试，不访问网络。"
+    try:
+        provider = create_provider(provider_name, model=model, base_url=base_url, api_key=api_key)
+        provider.health_check()
+        return f"✅ {provider_name} 连接测试成功（本次未发送论文文本）。"
+    except ProviderError as exc:
+        return f"❌ 连接测试失败：{sanitize_error(exc, api_key)}"
 
 
 def _review_to_text(review):
@@ -378,16 +391,24 @@ def build_ui():
                 gr.Markdown("### ⚙️ 配置")
 
                 mode_input = gr.Radio(
-                    ["Local Offline", "DeepSeek AI"], value="Local Offline",
+                    ["Local Offline", "AI Provider"], value="Local Offline",
                     label="运行模式", info="默认仅使用本地确定性功能，不访问网络"
                 )
 
+                provider_input = gr.Dropdown(
+                    provider_names(), value="DeepSeek", label="AI Provider", visible=False
+                )
+                model_input = gr.Textbox(label="模型名称", value="deepseek-chat", visible=False)
+                base_url_input = gr.Textbox(label="Base URL", value="https://api.deepseek.com", visible=False)
                 api_key_input = gr.Textbox(
-                    label="DeepSeek API Key",
+                    label="API Key（仅当前会话）",
                     placeholder="your_api_key_here",
                     type="password",
-                    info="在 platform.deepseek.com 获取"
+                    info="不会写入 .env 或结果文件",
+                    visible=False,
                 )
+                connection_btn = gr.Button("🔌 测试连接（可能产生一次请求）", visible=False)
+                connection_output = gr.Markdown(visible=False)
 
                 gr.HTML('<div class="tip-box">💡 可选功能：论文文本将发送至 DeepSeek API。请勿上传涉密、敏感或未授权材料。<br>Local Offline 模式不需要 API Key，也不访问网络。</div>')
 
@@ -412,7 +433,7 @@ def build_ui():
 1. 默认选择 Local Offline，无需 API Key
 2. 上传一篇或多篇 PDF 论文
 3. 点击「开始处理」查看本地解析和结构化对比
-4. 如主动选择 DeepSeek AI，再填写 API Key
+4. 如主动选择 AI Provider，再填写服务商、模型和配置
 
 > ⚠️ 仅支持**文字版 PDF**，扫描版图片 PDF 无法读取
                 """)
@@ -441,8 +462,22 @@ def build_ui():
         # 绑定事件
         submit_btn.click(
             fn=process_papers,
-            inputs=[pdf_input, api_key_input, mode_input],
+            inputs=[pdf_input, api_key_input, mode_input, provider_input, model_input, base_url_input],
             outputs=[result_text, docx_output],
+        )
+        mode_input.change(
+            lambda mode: [gr.update(visible=mode == "AI Provider")] * 6,
+            inputs=[mode_input],
+            outputs=[provider_input, model_input, base_url_input, api_key_input, connection_btn, connection_output],
+        )
+        provider_input.change(
+            lambda name: [provider_defaults(name)["model"], provider_defaults(name)["base_url"]],
+            inputs=[provider_input], outputs=[model_input, base_url_input],
+        )
+        connection_btn.click(
+            test_provider_connection,
+            inputs=[provider_input, model_input, base_url_input, api_key_input],
+            outputs=[connection_output],
         )
         local_search_btn.click(search_local_index, inputs=[local_query], outputs=[local_search_output])
 

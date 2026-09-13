@@ -56,6 +56,10 @@ class JsonClient:
         choice = type("Choice", (), {"message": message})
         return type("Response", (), {"choices": [choice]})
 
+    def generate(self, messages, **kwargs):
+        response = self.create(messages=messages, **kwargs)
+        return response.choices[0].message.content
+
 
 def test_extract_pages_keeps_one_based_page_numbers(tmp_path):
     pdf = make_pdf(tmp_path / "multi.pdf", ["page one", "page two"])

@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable
 
 import fitz
 from dotenv import load_dotenv
+from providers.base import LLMProvider, sanitize_error
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -349,7 +350,7 @@ def _has_document_instruction(text: str) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
 
-def _call_ai(client: Any, messages: list[dict[str, str]], config: PipelineConfig, temperature: float = 0.2, phase: str = "model request") -> str:
+def _call_ai(client: LLMProvider, messages: list[dict[str, str]], config: PipelineConfig, temperature: float = 0.2, phase: str = "model request") -> str:
     last_error = None
     for attempt in range(config.max_retries + 1):
         tracker = getattr(client, "_paper_request_tracker", None)
@@ -361,15 +362,9 @@ def _call_ai(client: Any, messages: list[dict[str, str]], config: PipelineConfig
                 pass
         tracker.before_request(phase)
         try:
-            response = client.chat.completions.create(
-                model=getattr(client, "_paper_model", "deepseek-chat"),
-                messages=messages,
-                temperature=temperature,
-                timeout=60,
-            )
-            return response.choices[0].message.content
+            return client.generate(messages, temperature=temperature, timeout=60)
         except Exception as exc:
-            last_error = exc
+            last_error = sanitize_error(exc, getattr(getattr(client, "config", None), "api_key", None))
             if attempt < config.max_retries:
                 time.sleep((attempt + 1) * 2)
     raise RuntimeError(f"AI 调用失败：{last_error}")
