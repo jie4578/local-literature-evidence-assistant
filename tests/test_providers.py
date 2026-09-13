@@ -1,6 +1,6 @@
 import pytest
 
-from providers import ProviderError, create_provider
+from providers import ProviderError, ProviderResponse, create_provider
 from providers import openai_compatible
 
 
@@ -87,6 +87,41 @@ def test_finish_reason_length_is_not_treated_as_success(monkeypatch):
     provider = create_provider("Ollama", model="llama3")
     with pytest.raises(ProviderError, match="output_limit_reached"):
         provider.generate([{"role": "user", "content": "health"}], max_output_tokens=20)
+
+
+def test_provider_returns_unified_response_and_preserves_usage_metadata(monkeypatch):
+    class RichOpenAI(FakeOpenAI):
+        def create(self, **kwargs):
+            self.calls.append({"client": self.kwargs, "request": kwargs})
+            message = type("Message", (), {"content": "structured"})
+            choice = type("Choice", (), {"message": message, "finish_reason": "stop"})
+            usage = type("Usage", (), {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18})
+            return type("Response", (), {"choices": [choice], "usage": usage, "id": "request-1", "model": "mock-model"})
+
+    monkeypatch.setattr(openai_compatible, "OpenAI", RichOpenAI)
+    provider = create_provider("Ollama", model="mock-model")
+    response = provider.generate([{"role": "user", "content": "health"}], max_output_tokens=20)
+    assert isinstance(response, ProviderResponse)
+    assert response.content == "structured"
+    assert response.finish_reason == "stop"
+    assert (response.input_tokens, response.output_tokens, response.total_tokens) == (11, 7, 18)
+    assert response.provider_request_id == "request-1"
+
+
+def test_finish_reason_length_exposes_safe_response_diagnostic(monkeypatch):
+    class TruncatedOpenAI(FakeOpenAI):
+        def create(self, **kwargs):
+            self.calls.append({"client": self.kwargs, "request": kwargs})
+            message = type("Message", (), {"content": '{"partial":'})
+            choice = type("Choice", (), {"message": message, "finish_reason": "length"})
+            return type("Response", (), {"choices": [choice]})
+
+    monkeypatch.setattr(openai_compatible, "OpenAI", TruncatedOpenAI)
+    provider = create_provider("Ollama", model="llama3")
+    with pytest.raises(ProviderError) as error:
+        provider.generate([{"role": "user", "content": "health"}], max_output_tokens=20)
+    assert error.value.code == "output_limit_reached"
+    assert error.value.response.finish_reason == "length"
 
 
 def test_two_sessions_keep_keys_instance_local_and_status_has_no_key(monkeypatch, tmp_path):

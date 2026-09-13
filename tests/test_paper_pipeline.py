@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import fitz
@@ -7,6 +8,9 @@ from dotenv import load_dotenv
 
 from paper_pipeline import (
     PipelineConfig,
+    PipelineAbort,
+    FatalProviderOutputError,
+    RequestBudgetExceeded,
     RequestTracker,
     batch_request_plan,
     PageText,
@@ -25,12 +29,15 @@ from paper_pipeline import (
     request_budget_plan,
     request_budget_summary,
     chunk_output_contract_summary,
+    dynamic_request_plan,
+    dynamic_batch_request_plan,
     validate_chunk_output,
     theoretical_request_count,
     _call_ai,
     verify_evidence,
     _dedupe_evidence,
 )
+from providers import ProviderResponse
 
 
 def make_pdf(path: Path, texts: list[str]) -> Path:
@@ -64,7 +71,7 @@ class JsonClient:
 
     def generate(self, messages, **kwargs):
         response = self.create(messages=messages, **kwargs)
-        return response.choices[0].message.content
+        return ProviderResponse.from_legacy_string(response.choices[0].message.content)
 
 
 def test_extract_pages_keeps_one_based_page_numbers(tmp_path):
@@ -193,8 +200,9 @@ def test_chunk_failure_is_recorded_and_later_chunk_can_continue():
         TextChunk("c1", "a.pdf", 1, 1, "one", 3),
         TextChunk("c2", "a.pdf", 2, 2, "two", 3),
     ]
-    first = analyze_chunk(client, chunks[0], PipelineConfig(max_retries=0))
-    second = analyze_chunk(client, chunks[1], PipelineConfig(max_retries=0))
+    partial_config = PipelineConfig(max_retries=0, failure_policy="continue_partial")
+    first = analyze_chunk(client, chunks[0], partial_config)
+    second = analyze_chunk(client, chunks[1], partial_config)
     assert first["errors"]
     assert second["summary"] == "ok"
 
@@ -253,11 +261,173 @@ def test_document_instruction_warnings_are_program_controlled():
     assert "9,999" not in result["warnings"]
 
 
+class SequenceProvider:
+    def __init__(self, sequence):
+        self.sequence = list(sequence)
+        self.calls = 0
+        self.config = SimpleNamespace(provider_name="Mock", model="mock-model", api_key=None)
+
+    def generate(self, messages, **kwargs):
+        self.calls += 1
+        item = self.sequence[self.calls - 1] if self.calls <= len(self.sequence) else RuntimeError("unexpected call")
+        if isinstance(item, Exception):
+            raise item
+        return item if isinstance(item, ProviderResponse) else ProviderResponse.from_legacy_string(item)
+
+
+def _make_many_chunk_pdf(path: Path) -> Path:
+    return make_pdf(path, [f"page {i} " + "body " * 12 for i in range(1, 16)])
+
+
+@pytest.mark.parametrize("failure", [
+    "invalid_json", "invalid_provider_output", "output_limit_reached", "timeout",
+])
+def test_fail_fast_aborts_after_first_provider_or_output_failure(tmp_path, failure):
+    valid = '{"summary":"ok","findings":[],"evidence":[]}'
+    if failure == "invalid_json":
+        bad = "not json"
+    elif failure == "invalid_provider_output":
+        bad = json.dumps({"summary": "ok", "findings": [], "evidence": [
+            {"claim": str(i), "evidence_quote": f"quote {i}", "evidence_type": "result"}
+            for i in range(9)
+        ]})
+    elif failure == "output_limit_reached":
+        bad = ProviderResponse('{"partial":', finish_reason="length")
+    else:
+        bad = RuntimeError("request timed out")
+    client = SequenceProvider([valid, valid, valid, bad, valid])
+    config = PipelineConfig(
+        chunk_size_chars=80, chunk_overlap_chars=0, max_retries=0, repair_attempts=0,
+        hard_request_limit=17, failure_policy="fail_fast",
+    )
+    result = analyze_paper_file(client, _make_many_chunk_pdf(tmp_path / f"{failure}.pdf"), config, tmp_path / "saved")
+    assert client.calls == 4
+    assert result["analysis_status"] == "partial_aborted"
+    assert result["analysis_complete"] is False
+    assert result["conclusion"] is None
+    assert all(phase == "chunk_analysis" for phase in client._paper_request_tracker.phases)
+    saved = json.loads((tmp_path / "saved" / f"{failure}_chunks.json").read_text(encoding="utf-8"))
+    assert len(saved) == 4 and all(not item["analysis"]["errors"] for item in saved[:3])
+    assert saved[3]["analysis"]["quality_flags"]
+
+
+def test_fail_fast_hard_limit_aborts_before_fifth_call(tmp_path):
+    client = SequenceProvider(['{"summary":"ok","findings":[],"evidence":[]}'] * 15)
+    config = PipelineConfig(
+        chunk_size_chars=80, chunk_overlap_chars=0, max_retries=0, repair_attempts=0,
+        hard_request_limit=3, failure_policy="fail_fast",
+    )
+    result = analyze_paper_file(client, _make_many_chunk_pdf(tmp_path / "budget.pdf"), config)
+    assert client.calls == 3
+    assert result["analysis_status"] == "partial_aborted"
+    assert "hard_request_limit" in result["quality_flags"]
+    assert len(client._paper_request_tracker.records) == 3
+
+
+def test_run_batch_fail_fast_writes_aborted_status_and_skips_final(tmp_path):
+    valid = '{"summary":"ok","findings":[],"evidence":[]}'
+    client = SequenceProvider([valid, valid, valid, "not json", valid])
+    config = PipelineConfig(
+        chunk_size_chars=80, chunk_overlap_chars=0, max_retries=0, repair_attempts=0,
+        hard_request_limit=17, failure_policy="fail_fast",
+    )
+    result = run_batch(client, [_make_many_chunk_pdf(tmp_path / "batch-fail.pdf")], tmp_path / "output", config)
+    status = json.loads((result.task_dir / "status.json").read_text(encoding="utf-8"))
+    assert client.calls == 4
+    assert status["status"] == "aborted"
+    assert result.final_review["errors"]
+    assert not (result.task_dir / "final_review.json").exists()
+
+
+def test_dynamic_preflight_stops_before_reduce_when_seventeen_is_insufficient(tmp_path):
+    dense = {
+        "summary": "s" * 400,
+        "findings": [f"finding {i} " + "f" * 170 for i in range(3)],
+        "evidence": [
+            {"claim": f"claim {i}", "evidence_quote": f"quote {i} " + "q" * 290, "evidence_type": "result"}
+            for i in range(8)
+        ],
+    }
+    client = SequenceProvider([json.dumps(dense)] * 15 + ["unexpected reduce call"])
+    config = PipelineConfig(
+        chunk_size_chars=80, chunk_overlap_chars=0, max_retries=0, repair_attempts=0,
+        hard_request_limit=17, failure_policy="fail_fast",
+    )
+    result = analyze_paper_file(client, _make_many_chunk_pdf(tmp_path / "preflight.pdf"), config)
+    assert client.calls == 15
+    assert result["analysis_status"] == "partial_aborted"
+    assert "request_plan_insufficient" in result["quality_flags"]
+    assert all(phase == "chunk_analysis" for phase in client._paper_request_tracker.phases)
+
+
+def test_sufficient_dynamic_plan_executes_reserved_final_request(tmp_path):
+    client = SequenceProvider([
+        '{"summary":"ok","findings":[],"evidence":[]}',
+        '{"title":"T"}',
+        '{"research_theme_overview":"R"}',
+    ])
+    config = PipelineConfig(max_retries=0, repair_attempts=0, hard_request_limit=3, failure_policy="fail_fast")
+    result = run_batch(client, [make_pdf(tmp_path / "small.pdf", ["body"])], tmp_path / "output", config)
+    assert client.calls == 3
+    assert result.papers[0]["analysis_status"] == "complete"
+    assert result.final_review["research_theme_overview"] == "R"
+    assert client._paper_request_tracker.phases == ["chunk_analysis", "paper_reduce_final", "batch_final_synthesis"]
+
+
+def test_invalid_output_diagnostic_contains_only_safe_metadata(tmp_path):
+    bad = json.dumps({"findings": [], "evidence": [
+        {"claim": str(i), "evidence_quote": f"q{i}", "evidence_type": "result"}
+        for i in range(9)
+    ]})
+    client = SequenceProvider([bad])
+    config = PipelineConfig(max_retries=0, repair_attempts=0, failure_policy="continue_partial")
+    result = analyze_chunk(client, TextChunk("c", "a.pdf", 2, 3, "body", 4), config)
+    diagnostic = result["diagnostics"][0]
+    assert diagnostic["chunk_id"] == "c"
+    assert (diagnostic["pdf_page_start"], diagnostic["pdf_page_end"]) == (2, 3)
+    assert diagnostic["violated_field"] == "evidence"
+    assert diagnostic["actual_evidence"] == 9
+    assert len(diagnostic["response_sha256"]) == 64
+    assert "content" not in diagnostic and "prompt" not in diagnostic
+
+
+def test_dynamic_plan_reserves_final_and_detects_extra_reduce_stage():
+    config = PipelineConfig(reduce_input_budget_chars=5000, reduce_prompt_overhead_chars=100, reduce_max_output_tokens=300, hard_request_limit=17)
+    small = [{"chunk": str(i), "analysis": {"summary": "small"}} for i in range(15)]
+    nominal = dynamic_request_plan(small, config)
+    assert nominal["base_request_count"] == 17
+    assert nominal["phases"][-1] == "batch_final_synthesis"
+    assert nominal["reserved_final_requests"] == 1
+
+    dense = [{"chunk": str(i), "analysis": {"summary": "x" * 600}} for i in range(15)]
+    dynamic = dynamic_request_plan(dense, config)
+    assert dynamic["base_request_count"] > 17
+    assert any(phase.startswith("paper_reduce_group_round_") for phase in dynamic["phases"])
+    assert dynamic["reason"] is None
+
+
+def test_dynamic_batch_plan_supports_recursive_rounds_and_termination():
+    config = PipelineConfig(reduce_input_budget_chars=1000, reduce_prompt_overhead_chars=100, reduce_max_output_tokens=100)
+    papers = [{"file_name": str(i), "major_results": ["x" * 250], "evidence": []} for i in range(6)]
+    plan = dynamic_batch_request_plan(papers, config)
+    assert plan["can_complete"] is True
+    assert any(phase == "batch_reduce_group_round_1" for phase in plan["phases"])
+    assert plan["phases"][-1] == "batch_final_synthesis"
+    assert plan["reserved_final_requests"] == 1
+
+    stuck = dynamic_batch_request_plan([{"x": "x" * 2000}], config)
+    assert stuck["can_complete"] is False
+    assert stuck["reason"] == "reduce_input_does_not_shrink"
+    limited = dynamic_batch_request_plan(papers, PipelineConfig(reduce_input_budget_chars=1000, reduce_prompt_overhead_chars=100, reduce_max_output_tokens=100, max_reduce_rounds=1))
+    assert limited["can_complete"] is False
+    assert limited["reason"] == "max_reduce_rounds_exceeded"
+
+
 @pytest.mark.parametrize("field,limit", [("methods", 2), ("results", 3)])
 def test_chunk_output_rejects_overlarge_auxiliary_arrays(field, limit):
     value = {"summary": "ok", "findings": [], "evidence": [], field: ["item"] * (limit + 1)}
     client = JsonClient([json.dumps(value)])
-    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0, failure_policy="continue_partial"))
     assert "invalid_provider_output" in result["quality_flags"]
     assert result["evidence"] == []
 
@@ -267,18 +437,18 @@ def test_chunk_output_rejects_too_many_evidence_items_and_duplicates():
         {"claim": str(i), "evidence_quote": f"quote {i}", "evidence_type": "result"}
         for i in range(9)
     ]}
-    result = analyze_chunk(JsonClient([json.dumps(too_many)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    result = analyze_chunk(JsonClient([json.dumps(too_many)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0, failure_policy="continue_partial"))
     assert "invalid_provider_output" in result["quality_flags"]
 
     duplicate = {"summary": "ok", "findings": [], "evidence": [
         {"claim": "same", "evidence_quote": "quote", "evidence_type": "result"},
         {"claim": "same", "evidence_quote": "quote", "evidence_type": "result"},
     ]}
-    result = analyze_chunk(JsonClient([json.dumps(duplicate)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    result = analyze_chunk(JsonClient([json.dumps(duplicate)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0, failure_policy="continue_partial"))
     assert "invalid_provider_output" in result["quality_flags"]
 
     cross_field_duplicate = {"findings": ["same fact"], "methods": ["same fact"], "evidence": []}
-    result = analyze_chunk(JsonClient([json.dumps(cross_field_duplicate)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    result = analyze_chunk(JsonClient([json.dumps(cross_field_duplicate)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0, failure_policy="continue_partial"))
     assert "invalid_provider_output" in result["quality_flags"]
 
 
@@ -286,7 +456,7 @@ def test_chunk_output_rejects_overlong_evidence_without_truncating():
     value = {"summary": "ok", "findings": [], "evidence": [
         {"claim": "short claim", "evidence_quote": "x" * 361, "evidence_type": "result"}
     ]}
-    result = analyze_chunk(JsonClient([json.dumps(value)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    result = analyze_chunk(JsonClient([json.dumps(value)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0, failure_policy="continue_partial"))
     assert "invalid_provider_output" in result["quality_flags"]
     assert result["evidence"] == []
 
@@ -320,14 +490,14 @@ def test_chunk_prompt_contains_same_bounded_output_contract():
 
 
 def test_request_plan_and_hard_limit_count_repair_and_stop():
-    assert request_plan(1) == ["chunk analysis", "single-paper reduce", "batch final synthesis"]
-    assert batch_request_plan([2, 3]) == ["chunk analysis", "chunk analysis", "single-paper reduce", "chunk analysis", "chunk analysis", "chunk analysis", "single-paper reduce", "batch final synthesis"]
+    assert request_plan(1) == ["chunk_analysis", "paper_reduce_final", "batch_final_synthesis"]
+    assert batch_request_plan([2, 3]) == ["chunk_analysis", "chunk_analysis", "paper_reduce_final", "chunk_analysis", "chunk_analysis", "chunk_analysis", "paper_reduce_final", "batch_final_synthesis"]
     client = JsonClient(["not json", '{"summary":"ok"}'])
-    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, hard_request_limit=1))
+    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, hard_request_limit=1, failure_policy="continue_partial"))
     assert result["errors"]
     assert client.calls == 1
     client = JsonClient(["ok"], fail_calls={1})
-    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=1, repair_attempts=0, hard_request_limit=2))
+    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=1, repair_attempts=0, hard_request_limit=2, failure_policy="continue_partial"))
     assert result["errors"]
     assert client.calls == 2
 
@@ -348,7 +518,7 @@ def test_stage_output_budgets_are_passed_to_provider(tmp_path):
 def test_request_budget_plan_and_summary_include_all_output_limits():
     config = PipelineConfig(max_retries=0, repair_attempts=0, hard_request_limit=4)
     plan = request_budget_plan(2, config)
-    assert [item["phase"] for item in plan] == ["chunk analysis", "chunk analysis", "single-paper reduce", "batch final synthesis"]
+    assert [item["phase"] for item in plan] == ["chunk_analysis", "chunk_analysis", "paper_reduce_final", "batch_final_synthesis"]
     assert [item["max_output_tokens"] for item in plan] == [1800, 1800, 2200, 2200]
     summary = request_budget_summary(2, config)
     assert summary["health_check"]["max_output_tokens"] == 20
@@ -365,7 +535,7 @@ def test_missing_output_budget_is_rejected():
 
 def test_invalid_json_without_repair_is_marked():
     client = JsonClient(["not json"])
-    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0, failure_policy="continue_partial"))
     assert result["errors"]
     assert "invalid_json" in result["quality_flags"]
 
@@ -378,7 +548,7 @@ def test_output_limit_failure_is_marked_and_not_normal_result():
     result = analyze_chunk(
         LimitedClient(),
         TextChunk("c", "a.pdf", 1, 1, "body", 4),
-        PipelineConfig(max_retries=0, repair_attempts=0),
+        PipelineConfig(max_retries=0, repair_attempts=0, failure_policy="continue_partial"),
     )
     assert result["errors"]
     assert "output_limit_reached" in result["quality_flags"]
@@ -391,9 +561,9 @@ def test_request_tracker_records_provider_model_limit_and_response_size():
     client = JsonClient(['{"ok":true}'])
     client.config = SimpleNamespace(provider_name="DeepSeek", model="deepseek-chat")
     config = PipelineConfig(max_retries=0, repair_attempts=0)
-    assert _call_ai(client, [{"role": "user", "content": "health"}], config, phase="chunk analysis", max_output_tokens=1600)
+    assert _call_ai(client, [{"role": "user", "content": "health"}], config, phase="chunk_analysis", max_output_tokens=1600)
     record = client._paper_request_tracker.records[0]
-    assert record["phase"] == "chunk analysis"
+    assert record["phase"] == "chunk_analysis"
     assert record["provider"] == "DeepSeek"
     assert record["model"] == "deepseek-chat"
     assert record["max_output_tokens"] == 1600
@@ -403,7 +573,7 @@ def test_request_tracker_records_provider_model_limit_and_response_size():
 
 def test_partial_chunks_are_explicitly_marked(tmp_path):
     pdf = make_pdf(tmp_path / "partial.pdf", ["one", "two", "three"])
-    config = PipelineConfig(chunk_size_chars=10, chunk_overlap_chars=1, max_retries=0)
+    config = PipelineConfig(chunk_size_chars=10, chunk_overlap_chars=1, max_retries=0, failure_policy="continue_partial")
     client = JsonClient(['{"summary":"ok","findings":[],"evidence":[]}', '{"title":"T"}'], fail_calls={1})
     result = analyze_paper_file(client, pdf, config)
     assert result["analysis_status"] == "partial"
@@ -413,7 +583,7 @@ def test_partial_chunks_are_explicitly_marked(tmp_path):
 
 def test_all_chunks_failed_do_not_generate_normal_conclusion(tmp_path):
     pdf = make_pdf(tmp_path / "failed.pdf", ["one", "two"])
-    config = PipelineConfig(chunk_size_chars=10, chunk_overlap_chars=1, max_retries=0)
+    config = PipelineConfig(chunk_size_chars=10, chunk_overlap_chars=1, max_retries=0, failure_policy="continue_partial")
     client = JsonClient(fail_calls=set(range(1, 20)))
     result = analyze_paper_file(client, pdf, config)
     assert result["analysis_status"] == "failed"
@@ -423,7 +593,7 @@ def test_all_chunks_failed_do_not_generate_normal_conclusion(tmp_path):
 
 def test_reduce_reviews_groups_and_recursively_merges(tmp_path):
     papers = [{"file_name": f"paper-{i}", "major_results": ["x" * 1000], "evidence": []} for i in range(6)]
-    config = PipelineConfig(reduce_input_budget_chars=5000, max_retries=0)
+    config = PipelineConfig(reduce_input_budget_chars=5000, reduce_max_output_tokens=100, max_retries=0)
     client = JsonClient(['{"research_theme_overview":"group","papers":[]}' for _ in range(20)])
     final, levels = reduce_reviews(client, papers, config, tmp_path)
     assert final["research_theme_overview"] == "group"

@@ -4,6 +4,7 @@ from .base import (
     DEFAULT_OUTPUT_TOKEN_BUDGETS,
     LLMProvider,
     OutputTokenBudgets,
+    ProviderResponse,
     ProviderConfig,
     ProviderError,
     sanitize_error,
@@ -12,6 +13,6 @@ from .registry import create_provider, provider_defaults, provider_names
 
 __all__ = [
     "DEFAULT_OUTPUT_TOKEN_BUDGETS", "LLMProvider", "OutputTokenBudgets",
-    "ProviderConfig", "ProviderError", "sanitize_error",
+    "ProviderConfig", "ProviderResponse", "ProviderError", "sanitize_error",
     "create_provider", "provider_defaults", "provider_names",
 ]

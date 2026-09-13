@@ -33,8 +33,53 @@ class ProviderConfig:
     output_budgets: OutputTokenBudgets = DEFAULT_OUTPUT_TOKEN_BUDGETS
 
 
+@dataclass(frozen=True)
+class ProviderResponse:
+    """Provider 统一响应；敏感请求头和密钥永远不进入此结构。"""
+
+    content: str
+    finish_reason: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    response_chars: int | None = None
+    provider_request_id: str | None = None
+    model: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.response_chars is None:
+            object.__setattr__(self, "response_chars", len(self.content or ""))
+
+    @classmethod
+    def from_legacy_string(cls, content: str) -> "ProviderResponse":
+        return cls(content=content, response_chars=len(content or ""))
+
+    def __str__(self) -> str:
+        return self.content
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.content == other
+        if isinstance(other, ProviderResponse):
+            return (
+                self.content, self.finish_reason, self.input_tokens,
+                self.output_tokens, self.total_tokens, self.response_chars,
+                self.provider_request_id, self.model,
+            ) == (
+                other.content, other.finish_reason, other.input_tokens,
+                other.output_tokens, other.total_tokens, other.response_chars,
+                other.provider_request_id, other.model,
+            )
+        return NotImplemented
+
+
 class ProviderError(RuntimeError):
     """用户可见的 Provider 错误，消息中不得包含密钥。"""
+
+    def __init__(self, message: str, code: str | None = None, response: ProviderResponse | None = None):
+        super().__init__(message)
+        self.code = code
+        self.response = response
 
 
 def sanitize_error(error: Any, secret: str | None = None) -> str:
@@ -51,16 +96,16 @@ class LLMProvider:
 
     config: ProviderConfig
 
-    def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+    def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> ProviderResponse:
         raise NotImplementedError
 
-    def generate_json(self, messages: list[dict[str, str]], schema: Any = None, **kwargs: Any) -> str:
+    def generate_json(self, messages: list[dict[str, str]], schema: Any = None, **kwargs: Any) -> ProviderResponse:
         return self.generate(messages, **kwargs)
 
     def validate_config(self) -> None:
         raise NotImplementedError
 
-    def health_check(self, max_output_tokens: int | None = None) -> str:
+    def health_check(self, max_output_tokens: int | None = None) -> ProviderResponse:
         self.validate_config()
         output_limit = (
             self.config.output_budgets.health_check_max_output_tokens

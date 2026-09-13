@@ -295,7 +295,12 @@ def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provid
     log_lines = []
     paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
     progress(0.05, desc="正在进行分页提取与分段分析...")
-    pipeline_result = run_batch(client, paths, output_root="output", config=PipelineConfig())
+    pipeline_result = run_batch(
+        client,
+        paths,
+        output_root="output",
+        config=PipelineConfig(failure_policy="fail_fast"),
+    )
     success_count = sum(not paper.get("errors") for paper in pipeline_result.papers)
     fail_count = len(pipeline_result.papers) - success_count
     for paper in pipeline_result.papers:
