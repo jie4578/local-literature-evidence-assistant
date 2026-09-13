@@ -24,6 +24,8 @@ from paper_pipeline import (
     save_json,
     request_budget_plan,
     request_budget_summary,
+    chunk_output_contract_summary,
+    validate_chunk_output,
     theoretical_request_count,
     _call_ai,
     verify_evidence,
@@ -251,6 +253,72 @@ def test_document_instruction_warnings_are_program_controlled():
     assert "9,999" not in result["warnings"]
 
 
+@pytest.mark.parametrize("field,limit", [("methods", 2), ("results", 3)])
+def test_chunk_output_rejects_overlarge_auxiliary_arrays(field, limit):
+    value = {"summary": "ok", "findings": [], "evidence": [], field: ["item"] * (limit + 1)}
+    client = JsonClient([json.dumps(value)])
+    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    assert "invalid_provider_output" in result["quality_flags"]
+    assert result["evidence"] == []
+
+
+def test_chunk_output_rejects_too_many_evidence_items_and_duplicates():
+    too_many = {"summary": "ok", "findings": [], "evidence": [
+        {"claim": str(i), "evidence_quote": f"quote {i}", "evidence_type": "result"}
+        for i in range(9)
+    ]}
+    result = analyze_chunk(JsonClient([json.dumps(too_many)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    assert "invalid_provider_output" in result["quality_flags"]
+
+    duplicate = {"summary": "ok", "findings": [], "evidence": [
+        {"claim": "same", "evidence_quote": "quote", "evidence_type": "result"},
+        {"claim": "same", "evidence_quote": "quote", "evidence_type": "result"},
+    ]}
+    result = analyze_chunk(JsonClient([json.dumps(duplicate)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    assert "invalid_provider_output" in result["quality_flags"]
+
+    cross_field_duplicate = {"findings": ["same fact"], "methods": ["same fact"], "evidence": []}
+    result = analyze_chunk(JsonClient([json.dumps(cross_field_duplicate)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    assert "invalid_provider_output" in result["quality_flags"]
+
+
+def test_chunk_output_rejects_overlong_evidence_without_truncating():
+    value = {"summary": "ok", "findings": [], "evidence": [
+        {"claim": "short claim", "evidence_quote": "x" * 361, "evidence_type": "result"}
+    ]}
+    result = analyze_chunk(JsonClient([json.dumps(value)]), TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    assert "invalid_provider_output" in result["quality_flags"]
+    assert result["evidence"] == []
+
+
+def test_chunk_output_contract_accepts_bounded_maximum_and_reports_estimate():
+    config = PipelineConfig(max_retries=0, repair_attempts=0)
+    value = {
+        "summary": "s" * config.chunk_max_summary_chars,
+        "title": "t" * config.chunk_max_title_chars,
+        "research_purpose": "p" * config.chunk_max_research_purpose_chars,
+        "findings": [f"finding {i}" for i in range(config.chunk_max_findings)],
+        "evidence": [
+            {"claim": f"claim {i}", "evidence_quote": f"quote {i}", "evidence_type": "result"}
+            for i in range(config.chunk_max_evidence_items)
+        ],
+    }
+    assert validate_chunk_output(value, config) == value
+    summary = chunk_output_contract_summary(config)
+    assert summary["unbounded_arrays"] is False
+    assert summary["estimated_max_output_tokens"] <= config.chunk_max_output_tokens
+
+
+def test_chunk_prompt_contains_same_bounded_output_contract():
+    client = JsonClient(['{"summary":"ok","findings":[],"evidence":[]}'])
+    config = PipelineConfig(max_retries=0, repair_attempts=0)
+    analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), config)
+    prompt = client.received[0]["messages"][1]["content"]
+    assert f"最多 {config.chunk_max_findings} 条" in prompt
+    assert f"最多 {config.chunk_max_evidence_items} 条" in prompt
+    assert "不会静默截断" in prompt
+
+
 def test_request_plan_and_hard_limit_count_repair_and_stop():
     assert request_plan(1) == ["chunk analysis", "single-paper reduce", "batch final synthesis"]
     assert batch_request_plan([2, 3]) == ["chunk analysis", "chunk analysis", "single-paper reduce", "chunk analysis", "chunk analysis", "chunk analysis", "single-paper reduce", "batch final synthesis"]
@@ -269,7 +337,7 @@ def test_stage_output_budgets_are_passed_to_provider(tmp_path):
     pdf = make_pdf(tmp_path / "budgets.pdf", ["source text"])
     client = JsonClient(['{"summary":"ok","findings":[],"evidence":[]}', '{"title":"T"}'])
     analyze_paper_file(client, pdf, config, tmp_path / "saved")
-    assert client.received[0]["max_output_tokens"] == 1600
+    assert client.received[0]["max_output_tokens"] == 1800
     assert client.received[1]["max_output_tokens"] == 2200
 
     review_client = JsonClient(['{"research_theme_overview":"ok"}'])
@@ -281,11 +349,11 @@ def test_request_budget_plan_and_summary_include_all_output_limits():
     config = PipelineConfig(max_retries=0, repair_attempts=0, hard_request_limit=4)
     plan = request_budget_plan(2, config)
     assert [item["phase"] for item in plan] == ["chunk analysis", "chunk analysis", "single-paper reduce", "batch final synthesis"]
-    assert [item["max_output_tokens"] for item in plan] == [1600, 1600, 2200, 2200]
+    assert [item["max_output_tokens"] for item in plan] == [1800, 1800, 2200, 2200]
     summary = request_budget_summary(2, config)
     assert summary["health_check"]["max_output_tokens"] == 20
     assert summary["base_request_count"] == 4
-    assert summary["theoretical_max_output_tokens"] == 7600
+    assert summary["theoretical_max_output_tokens"] == 8000
     assert summary["missing_output_limits"] == []
     assert theoretical_request_count(4, config) == 4
 

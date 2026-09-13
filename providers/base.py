@@ -11,7 +11,7 @@ from typing import Any
 class OutputTokenBudgets:
     """各类模型请求的集中式输出上限。"""
 
-    chunk_max_output_tokens: int = 1600
+    chunk_max_output_tokens: int = 1800
     reduce_max_output_tokens: int = 2200
     final_max_output_tokens: int = 2200
     health_check_max_output_tokens: int = 20
