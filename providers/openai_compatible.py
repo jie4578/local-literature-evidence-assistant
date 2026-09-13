@@ -19,6 +19,8 @@ class OpenAICompatibleProvider(LLMProvider):
         parsed = urlparse(self.config.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ProviderError("Base URL 无效：必须使用 HTTP(S) 地址")
+        if parsed.username is not None or parsed.password is not None:
+            raise ProviderError("Base URL 不允许包含用户名或密码")
         if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
             raise ProviderError("安全限制：远程 HTTP 地址被拒绝，仅允许 localhost 或 127.0.0.1")
         if not self.config.model.strip():

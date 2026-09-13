@@ -325,7 +325,7 @@ def test_provider_connection(provider_name, model, base_url, api_key):
     try:
         provider = create_provider(provider_name, model=model, base_url=base_url, api_key=api_key)
         provider.health_check()
-        return f"✅ {provider_name} 连接测试成功（本次未发送论文文本）。"
+        return f"✅ {provider_name} / {model} 连接测试成功（本次未发送论文文本）。"
     except ProviderError as exc:
         return f"❌ 连接测试失败：{sanitize_error(exc, api_key)}"
 
@@ -465,14 +465,29 @@ def build_ui():
             inputs=[pdf_input, api_key_input, mode_input, provider_input, model_input, base_url_input],
             outputs=[result_text, docx_output],
         )
+        def update_ai_visibility(mode):
+            visible = mode == "AI Provider"
+            return [
+                gr.update(visible=visible),
+                gr.update(visible=visible),
+                gr.update(visible=visible),
+                gr.update(visible=visible, value=""),
+                gr.update(visible=visible),
+                gr.update(visible=visible),
+            ]
+
+        def update_provider_fields(name):
+            defaults = provider_defaults(name)
+            return defaults["model"], defaults["base_url"], ""
+
         mode_input.change(
-            lambda mode: [gr.update(visible=mode == "AI Provider")] * 6,
+            update_ai_visibility,
             inputs=[mode_input],
             outputs=[provider_input, model_input, base_url_input, api_key_input, connection_btn, connection_output],
         )
         provider_input.change(
-            lambda name: [provider_defaults(name)["model"], provider_defaults(name)["base_url"]],
-            inputs=[provider_input], outputs=[model_input, base_url_input],
+            update_provider_fields,
+            inputs=[provider_input], outputs=[model_input, base_url_input, api_key_input],
         )
         connection_btn.click(
             test_provider_connection,

@@ -614,7 +614,12 @@ def run_batch(client: Any, pdf_files: Iterable[str | Path], output_root: str | P
     task_dir = Path(output_root) / f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     task_dir.mkdir(parents=True, exist_ok=False)
     result = PipelineResult(task_dir=task_dir)
-    save_json(task_dir / "status.json", {"status": "running", "started_at": datetime.now().isoformat(), "errors": []})
+    provider_config = getattr(client, "config", None)
+    provider_meta = {
+        "provider": getattr(provider_config, "provider_name", None),
+        "model": getattr(provider_config, "model", None),
+    }
+    save_json(task_dir / "status.json", {"status": "running", "started_at": datetime.now().isoformat(), **provider_meta, "errors": []})
     for file_path in pdf_files:
         paper_dir = task_dir / safe_name(Path(file_path).stem)
         paper = analyze_paper_file(client, file_path, config, paper_dir)
@@ -628,5 +633,5 @@ def run_batch(client: Any, pdf_files: Iterable[str | Path], output_root: str | P
         result.final_review = {**REVIEW_DEFAULTS, "warnings": ["缺少可核查原文证据"], "errors": ["所有论文分析失败，未生成正常综述"]}
     save_json(task_dir / "papers.json", result.papers)
     save_json(task_dir / "task_errors.json", result.errors)
-    save_json(task_dir / "status.json", {"status": "completed", "finished_at": datetime.now().isoformat(), "errors": result.errors})
+    save_json(task_dir / "status.json", {"status": "completed", "finished_at": datetime.now().isoformat(), **provider_meta, "errors": result.errors})
     return result
