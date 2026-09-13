@@ -45,13 +45,25 @@ class OpenAICompatibleProvider(LLMProvider):
 
     def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         try:
+            max_output_tokens = kwargs.get(
+                "max_output_tokens",
+                self.config.output_budgets.reduce_max_output_tokens,
+            )
+            if not isinstance(max_output_tokens, int) or max_output_tokens <= 0:
+                raise ProviderError("输出 Token 上限必须是正整数，不能静默忽略")
             response = self.client.chat.completions.create(
                 model=self.config.model,
                 messages=messages,
                 temperature=kwargs.get("temperature", 0.2),
                 timeout=kwargs.get("timeout", self.config.timeout),
+                max_tokens=max_output_tokens,
             )
-            return response.choices[0].message.content or ""
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                raise ProviderError("output_limit_reached：模型输出达到 Token 上限，响应可能不完整")
+            return choice.message.content or ""
+        except ProviderError:
+            raise
         except Exception as exc:
             text = sanitize_error(exc, self.config.api_key)
             lowered = text.casefold()

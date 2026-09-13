@@ -22,7 +22,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 import gradio as gr
 from paper_pipeline import PipelineConfig, run_batch
-from providers import ProviderError, create_provider, provider_defaults, provider_names, sanitize_error
+from providers import DEFAULT_OUTPUT_TOKEN_BUDGETS, ProviderError, create_provider, provider_defaults, provider_names, sanitize_error
 from exporters import export_csv, export_excel, export_json, export_word
 from local_extractor import extract_local_paper
 from local_summary import compare_papers, extractive_summary
@@ -62,11 +62,15 @@ def read_pdf(file_path):
     return text
 
 
-def call_ai(client, messages, temperature=0.3, max_retries=2):
+def call_ai(client, messages, temperature=0.3, max_retries=2, max_output_tokens=None):
+    output_limit = (
+        DEFAULT_OUTPUT_TOKEN_BUDGETS.final_max_output_tokens
+        if max_output_tokens is None else max_output_tokens
+    )
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            return client.generate(messages, temperature=temperature, timeout=60)
+            return client.generate(messages, temperature=temperature, timeout=60, max_output_tokens=output_limit)
         except Exception as e:
             last_error = sanitize_error(e, getattr(getattr(client, "config", None), "api_key", None))
             if attempt < max_retries:

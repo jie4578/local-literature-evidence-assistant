@@ -22,6 +22,10 @@ from paper_pipeline import (
     reduce_reviews,
     run_batch,
     save_json,
+    request_budget_plan,
+    request_budget_summary,
+    theoretical_request_count,
+    _call_ai,
     verify_evidence,
     _dedupe_evidence,
 )
@@ -258,6 +262,75 @@ def test_request_plan_and_hard_limit_count_repair_and_stop():
     result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=1, repair_attempts=0, hard_request_limit=2))
     assert result["errors"]
     assert client.calls == 2
+
+
+def test_stage_output_budgets_are_passed_to_provider(tmp_path):
+    config = PipelineConfig(max_retries=0, repair_attempts=0)
+    pdf = make_pdf(tmp_path / "budgets.pdf", ["source text"])
+    client = JsonClient(['{"summary":"ok","findings":[],"evidence":[]}', '{"title":"T"}'])
+    analyze_paper_file(client, pdf, config, tmp_path / "saved")
+    assert client.received[0]["max_output_tokens"] == 1600
+    assert client.received[1]["max_output_tokens"] == 2200
+
+    review_client = JsonClient(['{"research_theme_overview":"ok"}'])
+    reduce_reviews(review_client, [{"file_name": "a.pdf", "evidence": []}], config)
+    assert review_client.received[0]["max_output_tokens"] == 2200
+
+
+def test_request_budget_plan_and_summary_include_all_output_limits():
+    config = PipelineConfig(max_retries=0, repair_attempts=0, hard_request_limit=4)
+    plan = request_budget_plan(2, config)
+    assert [item["phase"] for item in plan] == ["chunk analysis", "chunk analysis", "single-paper reduce", "batch final synthesis"]
+    assert [item["max_output_tokens"] for item in plan] == [1600, 1600, 2200, 2200]
+    summary = request_budget_summary(2, config)
+    assert summary["health_check"]["max_output_tokens"] == 20
+    assert summary["base_request_count"] == 4
+    assert summary["theoretical_max_output_tokens"] == 7600
+    assert summary["missing_output_limits"] == []
+    assert theoretical_request_count(4, config) == 4
+
+
+def test_missing_output_budget_is_rejected():
+    with pytest.raises(ValueError, match="chunk_max_output_tokens"):
+        PipelineConfig(chunk_max_output_tokens=None)
+
+
+def test_invalid_json_without_repair_is_marked():
+    client = JsonClient(["not json"])
+    result = analyze_chunk(client, TextChunk("c", "a.pdf", 1, 1, "body", 4), PipelineConfig(max_retries=0, repair_attempts=0))
+    assert result["errors"]
+    assert "invalid_json" in result["quality_flags"]
+
+
+def test_output_limit_failure_is_marked_and_not_normal_result():
+    class LimitedClient:
+        def generate(self, messages, **kwargs):
+            raise RuntimeError("output_limit_reached: truncated response")
+
+    result = analyze_chunk(
+        LimitedClient(),
+        TextChunk("c", "a.pdf", 1, 1, "body", 4),
+        PipelineConfig(max_retries=0, repair_attempts=0),
+    )
+    assert result["errors"]
+    assert "output_limit_reached" in result["quality_flags"]
+    assert result["evidence"] == []
+
+
+def test_request_tracker_records_provider_model_limit_and_response_size():
+    from types import SimpleNamespace
+
+    client = JsonClient(['{"ok":true}'])
+    client.config = SimpleNamespace(provider_name="DeepSeek", model="deepseek-chat")
+    config = PipelineConfig(max_retries=0, repair_attempts=0)
+    assert _call_ai(client, [{"role": "user", "content": "health"}], config, phase="chunk analysis", max_output_tokens=1600)
+    record = client._paper_request_tracker.records[0]
+    assert record["phase"] == "chunk analysis"
+    assert record["provider"] == "DeepSeek"
+    assert record["model"] == "deepseek-chat"
+    assert record["max_output_tokens"] == 1600
+    assert record["response_chars"] > 0
+    assert "api_key" not in record
 
 
 def test_partial_chunks_are_explicitly_marked(tmp_path):

@@ -8,6 +8,19 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class OutputTokenBudgets:
+    """各类模型请求的集中式输出上限。"""
+
+    chunk_max_output_tokens: int = 1600
+    reduce_max_output_tokens: int = 2200
+    final_max_output_tokens: int = 2200
+    health_check_max_output_tokens: int = 20
+
+
+DEFAULT_OUTPUT_TOKEN_BUDGETS = OutputTokenBudgets()
+
+
+@dataclass(frozen=True)
 class ProviderConfig:
     provider_name: str
     model: str
@@ -17,6 +30,7 @@ class ProviderConfig:
     max_retries: int = 2
     input_budget_chars: int = 10500
     external_service: bool = True
+    output_budgets: OutputTokenBudgets = DEFAULT_OUTPUT_TOKEN_BUDGETS
 
 
 class ProviderError(RuntimeError):
@@ -46,10 +60,15 @@ class LLMProvider:
     def validate_config(self) -> None:
         raise NotImplementedError
 
-    def health_check(self) -> str:
+    def health_check(self, max_output_tokens: int | None = None) -> str:
         self.validate_config()
+        output_limit = (
+            self.config.output_budgets.health_check_max_output_tokens
+            if max_output_tokens is None else max_output_tokens
+        )
         return self.generate(
             [{"role": "system", "content": "你是连接测试助手，只返回 OK。"},
              {"role": "user", "content": "返回 OK，不要处理任何论文文本。"}],
             temperature=0,
+            max_output_tokens=output_limit,
         )

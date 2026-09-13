@@ -55,6 +55,38 @@ def test_localhost_http_is_allowed_and_all_providers_share_generate(monkeypatch)
     assert provider.generate([{"role": "user", "content": "health only"}]) == "OK"
     assert provider.health_check() == "OK"
     assert len(FakeOpenAI.calls) == 2
+    assert FakeOpenAI.calls[0]["request"]["max_tokens"] == 2200
+    assert FakeOpenAI.calls[1]["request"]["max_tokens"] == 20
+
+
+@pytest.mark.parametrize("provider_name, model, base_url, api_key, expected_limit", [
+    ("DeepSeek", "deepseek-chat", "https://api.deepseek.com", "deepseek-test", 1600),
+    ("OpenAI", "gpt-test", "https://api.openai.com/v1", "openai-test", 1600),
+    ("Ollama", "llama3", "http://127.0.0.1:11434/v1", None, 1600),
+    ("Custom OpenAI-Compatible", "custom", "https://example.com/v1", "custom-test", 1600),
+])
+def test_all_provider_adapters_map_internal_output_limit_to_max_tokens(
+    monkeypatch, provider_name, model, base_url, api_key, expected_limit
+):
+    FakeOpenAI.calls = []
+    monkeypatch.setattr(openai_compatible, "OpenAI", FakeOpenAI)
+    provider = create_provider(provider_name, model=model, base_url=base_url, api_key=api_key)
+    assert provider.generate([{"role": "user", "content": "health"}], max_output_tokens=expected_limit) == "OK"
+    assert FakeOpenAI.calls[-1]["request"]["max_tokens"] == expected_limit
+
+
+def test_finish_reason_length_is_not_treated_as_success(monkeypatch):
+    class TruncatedOpenAI(FakeOpenAI):
+        def create(self, **kwargs):
+            self.calls.append({"client": self.kwargs, "request": kwargs})
+            message = type("Message", (), {"content": '{"partial":'})
+            choice = type("Choice", (), {"message": message, "finish_reason": "length"})
+            return type("Response", (), {"choices": [choice]})
+
+    monkeypatch.setattr(openai_compatible, "OpenAI", TruncatedOpenAI)
+    provider = create_provider("Ollama", model="llama3")
+    with pytest.raises(ProviderError, match="output_limit_reached"):
+        provider.generate([{"role": "user", "content": "health"}], max_output_tokens=20)
 
 
 def test_two_sessions_keep_keys_instance_local_and_status_has_no_key(monkeypatch, tmp_path):
