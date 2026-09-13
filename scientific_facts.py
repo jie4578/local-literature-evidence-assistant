@@ -16,7 +16,7 @@ RULES = {
     "p_value": r"\bp\s*[<=>]\s*0?\.\d+\b",
     "confidence_interval": r"\b(?:95%\s*)?(?:CI|confidence interval)\s*[:=]?\s*\(?\s*[-\d.]+\s*(?:to|–|-|,)\s*[-\d.]+\s*\)?",
     "mean_sd": r"\b(?:mean|average)\s*(?:±|\+/-)\s*|\b\d+(?:\.\d+)?\s*±\s*\d+(?:\.\d+)?",
-    "research_method": r"\b(?:model\s+fit(?:ting)?|goodness\s+of\s+fit|fit(?:ting)?\s+criteria|convergence\s+criteria|cut[- ]off\s+thresholds?|nonlinear\s+mixed[- ]effects|two[- ]compartment\s+model)\b",
+    "research_method": r"\b(?:model\s+fit(?:ting)?|goodness[- ]of[- ]fit|fit(?:ting)?\s+criteria|convergence\s+criteria|cut[- ]off\s+thresholds?|nonlinear\s+mixed[- ]effects|two[- ]compartment\s+model|r\s*(?:square|squared|2|²)(?:\s*[<>=]\s*[-+]?\d*\.?\d+)?)",
     "randomization": r"\b(?:randomized|randomised|randomization|randomisation)\b",
     "double_blind": r"\bdouble[- ]blind(?:ed)?\b",
     "control_group": r"\bcontrol\s+group\b|\bplacebo\s+group\b",
@@ -29,6 +29,12 @@ RULES = {
 VISUAL_WORD_REPAIRS = (
     (re.compile(r"\bi\s+ncreased\b", re.IGNORECASE), "increased"),
     (re.compile(r"\bp\s+attern\b", re.IGNORECASE), "pattern"),
+    (re.compile(r"\bs\s+ite\b", re.IGNORECASE), "site"),
+    (re.compile(r"\bi\s+n\b", re.IGNORECASE), "in"),
+    (re.compile(r"\bt\s+o\b", re.IGNORECASE), "to"),
+    (re.compile(r"\br\s+ecommendations\b", re.IGNORECASE), "recommendations"),
+    (re.compile(r"\b12-w\s+eek\b", re.IGNORECASE), "12-week"),
+    (re.compile(r"\bs\s+upport\b", re.IGNORECASE), "support"),
 )
 
 
@@ -77,11 +83,14 @@ def extract_scientific_facts(pages: Iterable[Any]) -> list[dict[str, Any]]:
         for sentence in _sentences(display_text):
             display_sentence = repair_visual_word_breaks(sentence)
             normalized_sentence = re.sub(r"\s+", " ", display_sentence).strip()
+            is_model_fit = bool(re.search(RULES["research_method"], display_sentence, flags=re.IGNORECASE))
             # 出版标签、标题、作者和单位可能与下一段连成一个视觉句子；
             # 不把这类首屏前置信息当作科研事实。原始页面仍完整保留。
             if front_matter_prefix.match(normalized_sentence):
                 continue
             for category, pattern in RULES.items():
+                if category == "major_result" and is_model_fit:
+                    continue
                 if re.search(pattern, display_sentence, flags=re.IGNORECASE):
                     raw_quote = _raw_quote_for_display(sentence, raw_text)
                     if not raw_quote:

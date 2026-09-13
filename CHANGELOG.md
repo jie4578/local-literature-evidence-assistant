@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.0-bilingual-report-preview
+
+- 完善 Local Offline 与中英对照报告展示；
+- 增加中文字段名、英文证据原文、PDF 物理页码和 verified 状态的双语呈现边界；
+- 改进摘取式摘要、主要结果、局限性和结论的内容筛选；
+- 改进 Word 表格布局、固定列宽、表格分页保护、英文断词控制和中文字体标记；
+- 增加作者贡献、出版信息和模型拟合证据的章节级过滤与分类测试；
+- 支持 JSON、CSV、Excel 和 Word 结构化结果导出；
+- 当前版本为 Bilingual Report Preview，不是 Production Ready。
+
 ## v0.2.0-provider-preview
 
 - 增加可插拔 Provider 架构：DeepSeek、OpenAI、Ollama 和 Custom OpenAI-Compatible；

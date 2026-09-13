@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -7,7 +8,7 @@ import pytest
 from docx import Document
 from openpyxl import load_workbook
 
-from exporters import _major_results, export_csv, export_excel, export_json, export_word
+from exporters import DISPLAY_LABELS, _conclusions, _limitations, _major_results, export_csv, export_excel, export_json, export_word
 from bilingual import translate_paper_for_display
 from local_extractor import _clean_page_text, extract_local_paper
 from local_search import LocalSearchIndex
@@ -57,6 +58,24 @@ def test_section_parser_recognizes_introduction_variants_and_background_heading(
     assert "introduction" in sections and "methods" in sections
     background = parse_sections([PageText("a.pdf", 1, "Background\ncontext", 0, False)])
     assert "introduction" in background
+
+
+def test_section_parser_stops_at_author_and_publication_sections():
+    pages = [PageText("a.pdf", 1, "Conclusion\nThe intervention improved outcomes.\nAuthors' contributions\nCI (and AON) developed the bloods protocol for the RCT.\nCompeting interests\nFunding details.", 0, False)]
+    sections = parse_sections(pages)
+    assert "CI (and AON) developed" not in sections["conclusion"]["text"]
+    assert "Funding details" not in sections["conclusion"]["text"]
+
+
+def test_all_excluded_publication_headings_are_boundaries():
+    headings = [
+        "Authors' contributions", "Author contributions", "Acknowledgements", "Funding",
+        "Availability of data and materials", "Ethics approval", "Consent for publication",
+        "Competing interests", "Publisher's Note",
+    ]
+    for heading in headings:
+        sections = parse_sections([PageText("a.pdf", 1, f"Conclusion\nA conclusion.\n{heading}\nExcluded text.", 0, False)])
+        assert "Excluded text" not in sections["conclusion"]["text"]
 
 
 def test_local_search_fts_duplicate_update_phrase_and_clear(tmp_path):
@@ -265,7 +284,7 @@ def test_word_report_has_comparison_and_evidence_tables_without_internal_fields(
     path = export_word(rows, tmp_path / "report.docx", papers=[paper])
     document = Document(path)
     xml_text = "\n".join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
-    assert len(document.tables) >= 3
+    assert len(document.tables) >= 2
     assert "类型与页码" in xml_text and "PDF 第 2 页" in xml_text
     assert "research_object" not in xml_text and "None" not in xml_text and "[]" not in xml_text
 
@@ -283,6 +302,8 @@ def test_word_report_uses_compact_columns_and_merges_duplicate_evidence(tmp_path
     with ZipFile(path) as archive:
         xml = archive.read("word/document.xml")
     assert b"w:wordWrap" in xml and b"w:eastAsia" in xml
+    assert b"w:tblGrid" in xml and b"w:gridCol" in xml and b"w:cantSplit" in xml
+    assert b'w:w="1866"' in xml and b'w:w="5910"' in xml
 
 
 def test_fact_classification_and_display_word_repairs_are_conservative():
@@ -299,6 +320,11 @@ def test_fact_classification_and_display_word_repairs_are_conservative():
     assert any("increased" in fact["evidence_quote_display"] for fact in major_results)
     assert any("i ncreased" in fact["evidence_quote_raw"] for fact in major_results)
     assert repair_visual_word_breaks("double-blind and single-dose") == "double-blind and single-dose"
+
+
+def test_known_single_letter_display_breaks_are_repaired_without_changing_raw():
+    value = "s ite i n t o r ecommendations 12-w eek s upport"
+    assert repair_visual_word_breaks(value) == "site in to recommendations 12-week support"
 
 
 def test_word_report_uses_chinese_labels_and_mode_specific_notice(tmp_path):
@@ -336,3 +362,101 @@ def test_report_results_are_limited_to_complete_short_sentences():
     assert len(values) == 3
     assert all(len(value) <= 300 and value.endswith(".") for value in values)
     assert all("Fig." not in value and not value.endswith("compared") for value in values)
+
+
+def test_limitation_and_conclusion_selection_are_semantically_separate():
+    paper = {"sections": {
+        "discussion": {"text": "The oxidation level remained unchanged. The preliminary findings require replication in larger sample sizes."},
+        "conclusion": {"text": "In summary, PQA monitoring supports product risk assessment."},
+    }, "extractive_summary": {"evidence": []}}
+    row = {"limitations_original": [], "conclusion_original": []}
+    limitations = _limitations(paper, row)
+    conclusion = _conclusions(paper, row)
+    assert len(limitations) == 1 and "preliminary" in limitations[0]
+    assert "oxidation" not in " ".join(limitations).lower()
+    assert conclusion and "product risk assessment" in conclusion[0]
+    assert set(limitations).isdisjoint(conclusion)
+
+
+def test_word_final_spacer_is_one_point_with_zero_spacing(tmp_path):
+    paper = {"file_name": "mock.pdf", "title_candidate": "Mock", "facts": [
+        {"category": "sample_size", "evidence_quote_raw": "The study included 2 samples.", "evidence_quote_display": "The study included 2 samples.", "pdf_page_start": 1, "pdf_page_end": 1, "verified": True, "quality_flags": []},
+    ], "extractive_summary": {"evidence": []}}
+    path = export_word(compare_papers([paper]), tmp_path / "spacer.docx", papers=[paper])
+    with ZipFile(path) as archive:
+        xml = archive.read("word/document.xml").decode("utf-8")
+    paragraphs = re.findall(r"<w:p(?: [^>]*)?>.*?</w:p>", xml)
+    assert paragraphs
+    final = paragraphs[-1]
+    assert 'w:line="20"' in final and 'w:lineRule="exact"' in final
+    assert 'w:before="0"' in final and 'w:after="0"' in final
+    assert 'w:sz w:val="2"' in final
+
+
+def test_word_english_runs_use_en_us_and_disable_hyphenation(tmp_path):
+    paper = {"file_name": "mock.pdf", "title_candidate": "Mock", "facts": [
+        {"category": "p", "evidence_quote_raw": "The effects were significant, p = 0.003.", "evidence_quote_display": "The effects were significant, p = 0.003.", "pdf_page_start": 1, "pdf_page_end": 1, "verified": True, "quality_flags": []},
+    ], "extractive_summary": {"evidence": []}}
+    path = export_word(compare_papers([paper]), tmp_path / "language.docx", papers=[paper])
+    document = Document(path)
+    runs = [run for paragraph in document.paragraphs for run in paragraph.runs]
+    runs.extend(run for table in document.tables for row in table.rows for cell in row.cells for paragraph in cell.paragraphs for run in paragraph.runs)
+    for run in runs:
+        if run.text and run.text.strip() and not re.search(r"[\u3400-\u9fff]", run.text):
+            lang = run._element.get_or_add_rPr().find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}lang")
+            assert lang is not None and lang.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") == "en-US"
+    with ZipFile(path) as archive:
+        xml = archive.read("word/document.xml").decode("utf-8")
+    assert 'w:suppressAutoHyphens w:val="1"' in xml
+    assert 'w:wordWrap w:val="0"' in xml
+
+
+def test_display_type_mapping_keeps_method_distinct_from_model_fit():
+    assert DISPLAY_LABELS["research_method"] == "研究方法"
+    assert DISPLAY_LABELS["model_fit"] == "模型拟合"
+    assert DISPLAY_LABELS["r_square"] == "模型拟合"
+    assert DISPLAY_LABELS["temperature"] == "温度条件"
+
+
+def test_r_square_is_method_evidence_not_major_result_and_word_label(tmp_path):
+    pages = [{
+        "source_file": "fit.pdf", "page_number": 1,
+        "raw_text": "Methods\nR square = 0.92 and the model fit was acceptable.",
+        "text": "Methods\nR square = 0.92 and the model fit was acceptable.",
+        "display_text": "Methods\nR square = 0.92 and the model fit was acceptable.",
+    }]
+    facts = extract_scientific_facts(pages)
+    fit_facts = [fact for fact in facts if "R square" in fact["evidence_quote_raw"]]
+    assert fit_facts and all(fact["category"] in {"research_method", "model_fit"} for fact in fit_facts)
+    assert not any(fact["category"] == "major_result" for fact in fit_facts)
+    paper = {"file_name": "fit.pdf", "title_candidate": "Fit", "facts": fit_facts, "extractive_summary": {"evidence": []}}
+    path = export_word(compare_papers([paper]), tmp_path / "fit.docx", papers=[paper])
+    evidence_table = Document(path).tables[-1]
+    evidence_text = "\n".join(cell.text for row in evidence_table.rows[1:] for cell in row.cells)
+    assert "模型拟合" in evidence_text and "主要结果" not in evidence_text
+
+
+def test_summary_excludes_author_contribution_section_content():
+    raw = "Conclusion\nThe intervention improved outcomes.\nAuthors' contributions\nCI (and AON) developed the bloods protocol for the RCT."
+    pages = [{"source_file": "smiles.pdf", "page_number": 1, "raw_text": raw, "text": raw, "display_text": raw}]
+    sections = parse_sections(pages)
+    paper = {"pages": pages, "sections": sections}
+    summary = extractive_summary(paper)
+    assert all("bloods protocol" not in item.get("text", "") for item in summary["evidence"])
+    assert all("authors" not in item.get("text", "").casefold() for item in summary["evidence"])
+    assert all(not item.get("text", "").casefold().startswith(("authors", "ci (and aon)")) for item in summary["evidence"])
+
+
+def test_summary_and_conclusion_filter_publication_statements_and_questions():
+    paper = {
+        "pages": [{"page_number": 1, "raw_text": "Abstract\nA complete intervention improved outcomes.\nAll authors read and approved the manuscript.\nIf I improve my diet, will my mental health improve?\nThe intervention had significant effects.", "display_text": "Abstract\nA complete intervention improved outcomes.\nAll authors read and approved the manuscript.\nIf I improve my diet, will my mental health improve?\nThe intervention had significant effects."}],
+        "sections": {
+            "abstract": {"title": "Abstract", "text": "A complete intervention improved outcomes. All authors read and approved the manuscript.", "page_start": 1, "page_end": 1},
+            "conclusion": {"title": "Conclusion", "text": "If I improve my diet, will my mental health improve? The intervention had significant effects.", "page_start": 1, "page_end": 1},
+        },
+    }
+    summary = extractive_summary(paper)
+    assert all("All authors read and approved" not in item["text"] for item in summary["evidence"])
+    conclusion = _conclusions(paper, {})
+    assert conclusion and not conclusion[0].endswith("?")
+    assert "intervention" in conclusion[0].lower() or "effects" in conclusion[0].lower()

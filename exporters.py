@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -19,9 +19,12 @@ from docx.shared import Inches, Pt, RGBColor
 DISPLAY_LABELS = {
     "sample_size": "样本量",
     "time": "时间条件",
+    "temperature": "温度条件",
     "p": "统计结果",
     "p_value": "统计结果",
     "research_method": "研究方法",
+    "model_fit": "模型拟合",
+    "r_square": "模型拟合",
     "group_count": "分组数量",
     "randomization": "随机化",
     "double_blind": "双盲",
@@ -51,6 +54,17 @@ DISPLAY_LABELS = {
 
 def _display_token(value: Any) -> Any:
     return DISPLAY_LABELS.get(value, value) if isinstance(value, str) else value
+
+
+def _evidence_category_label(item: dict[str, Any], category: Any) -> str:
+    """根据已分类的原文区分普通研究方法和模型拟合证据。"""
+    if category in {"model_fit", "r_square"}:
+        return "模型拟合"
+    if category == "research_method":
+        source = str(item.get("evidence_quote_raw", item.get("evidence_quote_display", "")))
+        if re.search(r"\b(?:r\s*(?:square|squared|2|²)|model\s+fit|goodness[- ]of[- ]fit|fit(?:ting)?\s+criteria)\b", source, re.IGNORECASE):
+            return "模型拟合"
+    return str(_display_token(category) or "其他证据")
 
 
 def export_json(value: Any, path: str | Path) -> Path:
@@ -101,7 +115,9 @@ def _flat_value(value: Any) -> str:
     if isinstance(value, bool):
         return "是" if value else "否"
     if isinstance(value, (list, tuple, set)):
-        return "；".join(_flat_value(_display_token(item)) for item in value)
+        parts = [_flat_value(_display_token(item)) for item in value]
+        joiner = "；" if any(re.search(r"[\u3400-\u9fff]", part) for part in parts) else "; "
+        return joiner.join(parts)
     if isinstance(value, dict):
         return "；".join(f"{key}: {_flat_value(item)}" for key, item in value.items())
     return str(_display_token(value)).replace("**", "")
@@ -114,7 +130,7 @@ def _set_no_mid_word_breaks(paragraph) -> None:
         if element is None:
             element = OxmlElement(tag)
             properties.append(element)
-        element.set(qn("w:val"), "0")
+        element.set(qn("w:val"), "0" if tag == "w:wordWrap" else "1")
 
 
 def _set_run_font(run, size: float = 10.5, bold: bool = False, color: str = "000000", language: str | None = None) -> None:
@@ -130,7 +146,8 @@ def _set_run_font(run, size: float = 10.5, bold: bool = False, color: str = "000
     if lang is None:
         lang = OxmlElement("w:lang")
         run._element.get_or_add_rPr().append(lang)
-    lang.set(qn("w:val"), language or ("en-US" if run.text and all(ord(char) < 128 for char in run.text) else "zh-CN"))
+    has_cjk = bool(run.text and re.search(r"[\u3400-\u9fff]", run.text))
+    lang.set(qn("w:val"), language or ("zh-CN" if has_cjk else "en-US"))
 
 
 def _set_cell_shading(cell, fill: str) -> None:
@@ -182,6 +199,37 @@ def _repeat_header(row) -> None:
     tr_pr.append(header)
 
 
+def _prevent_row_split(row) -> None:
+    tr_pr = row._tr.get_or_add_trPr()
+    cant_split = OxmlElement("w:cantSplit")
+    cant_split.set(qn("w:val"), "true")
+    tr_pr.append(cant_split)
+
+
+def _set_table_grid(table, widths: list[float] | None) -> None:
+    if not widths:
+        return
+    grid = table._tbl.tblGrid
+    for child in list(grid):
+        grid.remove(child)
+    for width in widths:
+        column = OxmlElement("w:gridCol")
+        column.set(qn("w:w"), str(round(width * 1440)))
+        grid.append(column)
+    table_properties = table._tbl.tblPr
+    layout = table_properties.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        table_properties.append(layout)
+    layout.set(qn("w:type"), "fixed")
+    table_width = table_properties.find(qn("w:tblW"))
+    if table_width is None:
+        table_width = OxmlElement("w:tblW")
+        table_properties.append(table_width)
+    table_width.set(qn("w:w"), str(round(sum(widths) * 1440)))
+    table_width.set(qn("w:type"), "dxa")
+
+
 def _format_cell(cell, value: Any, *, header: bool = False) -> None:
     cell.text = ""
     paragraph = cell.paragraphs[0]
@@ -204,17 +252,34 @@ def _add_table(document: Document, headers: list[str], rows: Iterable[Iterable[A
     table.autofit = False
     header_row = table.rows[0]
     _repeat_header(header_row)
+    _prevent_row_split(header_row)
     for index, header in enumerate(headers):
         _format_cell(header_row.cells[index], header, header=True)
         if widths:
             header_row.cells[index].width = Inches(widths[index])
     for row_values in rows:
         row = table.add_row()
+        _prevent_row_split(row)
         for index, value in enumerate(row_values):
             _format_cell(row.cells[index], value)
             if widths:
                 row.cells[index].width = Inches(widths[index])
-    document.add_paragraph().paragraph_format.space_after = Pt(2)
+    _set_table_grid(table, widths)
+    spacer = document.add_paragraph()
+    spacer.paragraph_format.space_before = Pt(0)
+    spacer.paragraph_format.space_after = Pt(0)
+    spacer.paragraph_format.line_spacing = Pt(1)
+    spacer.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    spacer_properties = spacer._p.get_or_add_pPr()
+    spacer_run_properties = spacer_properties.find(qn("w:rPr"))
+    if spacer_run_properties is None:
+        spacer_run_properties = OxmlElement("w:rPr")
+        spacer_properties.append(spacer_run_properties)
+    spacer_size = spacer_run_properties.find(qn("w:sz"))
+    if spacer_size is None:
+        spacer_size = OxmlElement("w:sz")
+        spacer_run_properties.append(spacer_size)
+    spacer_size.set(qn("w:val"), "2")
     return table
 
 
@@ -251,7 +316,10 @@ def _paper_evidence(paper: dict[str, Any], row: dict[str, Any]) -> list[dict[str
         display = item.get("evidence_quote_display", item.get("evidence_quote", raw))
         compact = re.sub(r"\s+", " ", str(display)).strip()
         lowered = compact.casefold()
-        if item.get("section") in {"references", "introduction"}:
+        section = str(item.get("section", "")).casefold()
+        if section in {"references", "introduction"}:
+            continue
+        if _is_non_content_sentence(compact):
             continue
         if re.match(r"^(?:research article|open access|original article|article|plos one|keywords?|correspondence|copyright|funding|author contributions|competing interests?)\b", compact, re.IGNORECASE):
             continue
@@ -308,10 +376,60 @@ def _complete_sentences(values: Any, limit: int, max_chars: int = 300) -> list[s
     return result
 
 
+def _is_non_content_sentence(value: Any) -> bool:
+    """排除出版元数据、署名/单位和章节后的附录信息。"""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.casefold()
+    if not text:
+        return True
+    if re.match(
+        r"^(?:keywords?|correspondence|doi|received|accepted|trial registration|registered on|"
+        r"author details|authors?['’] contributions|competing interests?|acknowledg|ethics approval|consent for publication)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    if "all authors read and approved" in lowered or "authors' contributions" in lowered or "authors’ contributions" in lowered:
+        return True
+    if "doi.org/" in lowered or "creativecommons" in lowered or "article is distributed" in lowered or "@" in text:
+        return True
+    if re.search(r"\b(?:university|department|institute|school|hospital|centre|center),\s", text, re.IGNORECASE):
+        return True
+    return False
+
+
+def _explicit_limitation(text: str) -> bool:
+    return bool(re.search(r"\b(?:limitation|limited|preliminary|replication|larger sample|small sample|single laboratory|single[- ]center|short duration)\b", text, re.IGNORECASE))
+
+
+def _without_repeats(values: list[str], excluded: set[str]) -> list[str]:
+    return [value for value in values if re.sub(r"\s+", " ", value).strip().casefold() not in excluded]
+
+
 def _paper_summary_items(paper: dict[str, Any], section_key: str | None = None) -> list[dict[str, Any]]:
     summary = paper.get("extractive_summary") or {}
     items = summary.get("evidence", []) if isinstance(summary, dict) else []
-    return [item for item in items if (section_key is None or item.get("section_key") == section_key) and item.get("verified") is True and not item.get("quality_flags")]
+    return [
+        item
+        for item in items
+        if (section_key is None or item.get("section_key") == section_key)
+        and item.get("verified") is True
+        and not item.get("quality_flags")
+        and not _is_non_content_sentence(item.get("text"))
+    ]
+
+
+def _section_sentences(paper: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    values = []
+    for key in keys:
+        text = paper.get("sections", {}).get(key, {}).get("text", "")
+        joined = re.sub(r"\s+", " ", str(text)).strip()
+        values.extend(
+            part.strip()
+            for part in re.split(r"(?<=[.!?。！？])\s+", joined)
+            if part.strip() and not _is_non_content_sentence(part)
+        )
+    return values
 
 
 def _major_results(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
@@ -322,26 +440,58 @@ def _major_results(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
 
 
 def _limitations(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
-    values = [item.get("text") for item in _paper_summary_items(paper, "discussion") + _paper_summary_items(paper, "conclusion")]
-    if not values:
-        values = row.get("limitations_original", [])
-    return _complete_sentences(values, 2, 300)
+    values = list(row.get("limitations_original", []))
+    values.extend(_section_sentences(paper, ("discussion", "conclusion")))
+    values.extend(item.get("text") for item in _paper_summary_items(paper, "discussion") + _paper_summary_items(paper, "conclusion"))
+    values = [value for value in values if _explicit_limitation(str(value)) and not (
+        re.search(r"oxidation|lysine", str(value), re.IGNORECASE)
+        and not re.search(r"limitation|limited|small sample|short duration|larger sample|replication", str(value), re.IGNORECASE)
+    )]
+    ranked = sorted(
+        dict.fromkeys(str(value) for value in values),
+        key=lambda value: (
+            -sum(bool(re.search(pattern, value, re.IGNORECASE)) for pattern in (r"larger sample", r"replication", r"small sample", r"short duration", r"limitation", r"limited")),
+            -int(bool(re.search(r"preliminary", value, re.IGNORECASE))),
+            len(value),
+        ),
+    )
+    return _complete_sentences(ranked, 2, 300)
 
 
 def _conclusions(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
     candidates = _paper_summary_items(paper, "conclusion") + _paper_summary_items(paper, "discussion") + _paper_summary_items(paper, "abstract")
+    candidates.extend(
+        {"text": text, "section_key": section_key, "verified": True, "quality_flags": []}
+        for section_key in ("conclusion", "discussion", "abstract")
+        for text in _section_sentences(paper, (section_key,))
+    )
     def score(item: dict[str, Any]) -> int:
         text = item.get("text", "")
+        if re.search(r"\?\s*$", text):
+            return -100
+        if re.search(r"\b(?:analys(?:is|es)|mmrm|mixed[- ]effects|statistical method|methodological approach)\b", text, re.IGNORECASE) and not re.search(r"criticality|product risk assessment|pqa|efficacious|conclusion|suggest", text, re.IGNORECASE):
+            return -100
         value = 0
-        if re.search(r"pqa|lc[-/]ms|model|drug development", text, re.IGNORECASE):
-            value += 12
+        if re.search(r"criticality|product risk assessment", text, re.IGNORECASE):
+            value += 30
+        elif re.search(r"pqa", text, re.IGNORECASE):
+            value += 20
+        elif re.search(r"drug development", text, re.IGNORECASE):
+            value += 15
+        elif re.search(r"lc[-/]ms|model", text, re.IGNORECASE):
+            value += 8
+        if re.search(r"intervention|improvement|effect|outcome|significant", text, re.IGNORECASE):
+            value += 10
         if item.get("section_key") in {"conclusion", "discussion"}:
-            value += 4
+            value += 15 if item.get("section_key") == "conclusion" else 8
         if re.search(r"conclu|showed|improv|effective|stability|greater", text, re.IGNORECASE):
             value += 2
         return value
     ranked = sorted(candidates, key=lambda item: (-score(item), len(item.get("text", ""))))
-    values = [item.get("text") for item in ranked if score(item) > 0] or [item.get("text") for item in candidates] or row.get("conclusion_original", [])
+    values = [item.get("text") for item in ranked if score(item) > 0] or [item.get("text") for item in candidates if score(item) >= 0] or row.get("conclusion_original", [])
+    result_values = {re.sub(r"\s+", " ", value).strip().casefold() for value in _major_results(paper, row)}
+    limitation_values = {re.sub(r"\s+", " ", value).strip().casefold() for value in _limitations(paper, row)}
+    values = _without_repeats(values, result_values | limitation_values)
     return _complete_sentences(values, 1, 300)
 
 
@@ -420,26 +570,27 @@ def export_word(
         _set_run_font(run, size=9)
 
     paper_list = papers or rows
-    _add_heading(document, "多论文对比", 2)
     comparison_keys = (
         ("title_candidate", "标题"), ("author_candidate", "第一作者"), ("year_candidate", "年份"),
         ("doi", "DOI"), ("research_object", "研究对象"), ("sample_size", "样本量"),
         ("research_methods_keywords", "研究方法"), ("major_results_original", "主要结果"),
         ("limitations_original", "局限性"), ("conclusion_original", "结论"),
     )
-    for batch_start in range(0, len(rows), 2):
-        batch_rows = rows[batch_start:batch_start + 2]
-        batch_papers = paper_list[batch_start:batch_start + 2]
-        table_rows = []
-        for key, label in comparison_keys:
-            values = [label]
-            for row, paper in zip(batch_rows, batch_papers):
-                values.append(_comparison_value(row, key, paper))
-            table_rows.append(values)
-        if batch_start:
-            _add_heading(document, f"多论文对比（第 {batch_start + 1}–{batch_start + len(batch_rows)} 篇）", 3)
-        headers = ["对比维度"] + [f"论文 {batch_start + i + 1}\n{row.get('file_name') or '未命名文件'}" for i, row in enumerate(batch_rows)]
-        _add_table(document, headers, table_rows, [1.15] + [3.0] * len(batch_rows))
+    if len(rows) > 1:
+        _add_heading(document, "多论文对比", 2)
+        for batch_start in range(0, len(rows), 2):
+            batch_rows = rows[batch_start:batch_start + 2]
+            batch_papers = paper_list[batch_start:batch_start + 2]
+            table_rows = []
+            for key, label in comparison_keys:
+                values = [label]
+                for row, paper in zip(batch_rows, batch_papers):
+                    values.append(_comparison_value(row, key, paper))
+                table_rows.append(values)
+            if batch_start:
+                _add_heading(document, f"多论文对比（第 {batch_start + 1}–{batch_start + len(batch_rows)} 篇）", 3)
+            headers = ["对比维度"] + [f"论文 {batch_start + i + 1}\n{row.get('file_name') or '未命名文件'}" for i, row in enumerate(batch_rows)]
+            _add_table(document, headers, table_rows, [1.15] + [3.0] * len(batch_rows))
 
     if final_review:
         labels = {"research_theme_overview": "研究主题概述", "major_methods": "主要研究方法", "common_conclusions": "共同结论", "different_or_conflicting_conclusions": "不同或冲突结论", "research_gaps": "研究空白", "future_recommendations": "后续研究建议"}
@@ -450,8 +601,6 @@ def export_word(
 
     detail_papers = paper_list
     for index, paper in enumerate(detail_papers):
-        if index == 0 or rows:
-            document.add_page_break()
         row = rows[index] if index < len(rows) else {}
         _add_heading(document, f"论文详情 {index + 1}", 2)
         _add_table(document, ["字段", "内容"], [
@@ -461,11 +610,14 @@ def export_word(
             ("DOI", paper.get("doi") or row.get("doi")),
         ], [1.3, 5.55])
         labels = (("research_object", "研究对象"), ("sample_size", "样本量说明"), ("research_methods_keywords", "研究方法"),
-                  ("experimental_conditions", "实验条件"), ("statistical_information", "统计信息"))
+                  ("experimental_conditions", "实验条件"))
         for key, label in labels:
             value = paper.get(key, row.get(key))
             if value:
                 _add_field_paragraph(document, label, _research_object_display(value) if key == "research_object" else value)
+        _add_heading(document, "统计信息", 3)
+        for value in _complete_sentences(paper.get("statistical_information", row.get("statistical_information", [])), 3, 300):
+            _add_field_paragraph(document, "原文", value)
         _add_heading(document, "结构化概览", 3)
         missing = row.get("missing_fields") or []
         _add_field_paragraph(document, "缺失字段", [DISPLAY_LABELS.get(item, item) for item in missing])
@@ -473,7 +625,10 @@ def export_word(
         for value in _major_results(paper, row):
             _add_field_paragraph(document, "原文", value)
         _add_heading(document, "局限性", 3)
-        for value in _limitations(paper, row):
+        limitation_values = _limitations(paper, row)
+        if not limitation_values:
+            _add_field_paragraph(document, "说明", "未提取到明确局限性")
+        for value in limitation_values:
             _add_field_paragraph(document, "原文", value)
         _add_heading(document, "结论", 3)
         for value in _conclusions(paper, row):
@@ -494,7 +649,7 @@ def export_word(
             pages = item.get("pdf_pages") or ([item.get("pdf_page_start")] if item.get("pdf_page_start") else [])
             page_text = "、".join(str(page) for page in pages if page)
             categories = item.get("_merged_categories") or [item.get("category", item.get("evidence_type"))]
-            type_text = "、".join(str(_display_token(category) or "其他证据") for category in dict.fromkeys(categories))
+            type_text = "、".join(_evidence_category_label(item, category) for category in dict.fromkeys(categories))
             type_page = f"{type_text}\nPDF 第 {page_text or '未知'} 页"
             quality = [_display_token(flag) for flag in (item.get("quality_flags") or [])] or "无异常"
             if has_translation:
@@ -502,7 +657,7 @@ def export_word(
             else:
                 evidence_rows.append([type_page, item.get("evidence_quote_display", item.get("evidence_quote", item.get("evidence_quote_raw"))), "已验证" if item.get("verified") is True else "未验证，请回查原文", quality])
         evidence_headers = ["类型与页码", "中文译文", "英文证据原文", "验证状态", "质量提示"] if has_translation else ["类型与页码", "英文证据原文", "验证状态", "质量提示"]
-        evidence_widths = [0.9, 1.5, 3.9, 0.6, 0.3] if has_translation else [1.3, 4.1, 0.86, 0.94]
+        evidence_widths = [0.9, 1.5, 3.9, 0.6, 0.3] if has_translation else [1.296, 4.104, 0.864, 0.936]
         _add_table(document, evidence_headers, evidence_rows, evidence_widths)
         # rows-only 是旧调用兼容路径；保留一份可被普通段落读取的原文，
         # 同时证据表仍是用户报告的主要呈现形式。

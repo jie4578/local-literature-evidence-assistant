@@ -253,7 +253,7 @@ def process_local_papers(pdf_files, progress=gr.Progress(), result_language="中
         lines.append(f"标题：{paper.get('title_candidate') or '未提取到'}；作者：{paper.get('author_candidate') or '未提取到'}；年份：{paper.get('year_candidate') or '未提取到'}")
         lines.append(f"研究对象：{paper.get('research_object') or '未提取到'}；样本量：{paper.get('sample_size') or '未提取到'}")
         methods = compare_papers([paper])[0].get("research_methods_keywords", [])
-        method_labels = {"immunocapture_lc_ms": "免疫捕获 LC-MS", "affinity_purification_lc_ms": "亲和纯化 LC-MS", "single_dose_pk": "单次给药 PK", "multiple_dose_pk": "多次给药 PK", "randomized_controlled_trial": "随机对照试验", "dietary_intervention": "饮食干预", "randomization": "随机化", "double_blind": "双盲", "control_group": "对照组", "group_count": "分组数量"}
+        method_labels = {"research_method": "研究方法", "model_fit": "模型拟合", "r_square": "模型拟合", "immunocapture_lc_ms": "免疫捕获 LC-MS", "affinity_purification_lc_ms": "亲和纯化 LC-MS", "single_dose_pk": "单次给药 PK", "multiple_dose_pk": "多次给药 PK", "randomized_controlled_trial": "随机对照试验", "dietary_intervention": "饮食干预", "randomization": "随机化", "double_blind": "双盲", "control_group": "对照组", "group_count": "分组数量"}
         lines.append(f"研究方法：{'; '.join(method_labels.get(method, method) for method in methods) or '未提取到'}")
         if paper.get("errors"):
             lines.extend(f"错误：{error}" for error in paper["errors"])

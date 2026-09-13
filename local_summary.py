@@ -178,13 +178,15 @@ def _is_metadata_candidate(sentence: str) -> bool:
     }
     if lowered in blocked or "doi.org/" in lowered or "@" in sentence:
         return True
-    if any(term in lowered for term in ("financial disclosure", "no relevant financial", "competing interest", "funding", "author contributions", "acknowledg")):
+    if re.match(r"^(?:keywords?|correspondence|doi|received|accepted|trial registration|registered on|author details|authors?['’] contributions|competing interests?)\b", normalized, re.IGNORECASE):
+        return True
+    if any(term in lowered for term in ("all authors read and approved", "financial disclosure", "no relevant financial", "competing interest", "funding", "author contributions", "acknowledg", "ethics approval", "consent for publication", "creative commons", "article is distributed")):
         return True
     if normalized[:1].islower():
         return True
     if re.fullmatch(r"[A-Z][A-Z\s,.'-]{5,}", normalized):
         return True
-    if any(term in lowered for term in ("university", "department of", "institute", "school of", "corresponding author")):
+    if any(term in lowered for term in ("university", "department of", "institute", "school of", "corresponding author", "hospital", "author details")):
         return True
     if not re.search(r"[.!?。！？]$", normalized):
         return True
@@ -203,7 +205,7 @@ def _looks_incomplete_fragment(sentence: str) -> bool:
 
 def _find_raw_match(target: str, raw_text: str) -> str | None:
     target_forms = [_normalize_for_match(target)]
-    for fixed, broken in (("increased", "i ncreased"), ("pattern", "p attern")):
+    for fixed, broken in (("increased", "i ncreased"), ("pattern", "p attern"), ("site", "s ite"), ("in", "i n"), ("to", "t o"), ("recommendations", "r ecommendations"), ("12-week", "12-w eek"), ("support", "s upport")):
         if fixed in target.casefold():
             target_forms.append(_normalize_for_match(re.sub(fixed, broken, target, flags=re.IGNORECASE)))
     for normalized_target in dict.fromkeys(target_forms):
@@ -249,7 +251,7 @@ def _score_sentence(sentence: str, section_name: str) -> int:
         "abstract": ("purpose", "objective", "aim", "investigat", "evaluat", "developed", "quantif", "background", "randomi"),
         "introduction": ("purpose", "objective", "aim", "background", "we sought"),
         "methods": ("random", "double-blind", "controlled", "trial", "sample", "dose", "week", "method", "lc-ms", "immunocapture", "monkey", "pk", "multiple-dose", "single-dose"),
-        "results": ("p ", "p=", "p<", "%", "significant", "result", "mean", "improvement", "decreased", "increased", "deamidation", "ptm", "effect size"),
+        "results": ("p ", "p=", "p<", "%", "significant", "result", "mean", "improvement", "decreased", "increased", "deamidation", "ptm", "effect size", "unchanged", "no change", "remained", "unaffected", "stable", "oxidation", "lysine"),
         "conclusion": ("conclu", "suggest", "greater", "effective", "limitation", "showed", "improved"),
         "discussion": ("conclu", "limitation", "suggest", "result"),
     }

@@ -16,10 +16,30 @@ SECTION_ALIASES = {
     "references": ("references", "bibliography", "参考文献"),
 }
 
+EXCLUDED_SECTION_ALIASES = (
+    "authors' contributions",
+    "author contributions",
+    "acknowledgements",
+    "acknowledgments",
+    "funding",
+    "availability of data and materials",
+    "ethics approval",
+    "consent for publication",
+    "competing interests",
+    "publisher's note",
+)
+
 
 def _heading_kind(line: str) -> str | None:
     cleaned = re.sub(r"^\s*(?:\d+(?:\.\d+)*[.)、]?|[IVX]+[.)])\s*", "", line).strip(" #*\t")
-    if len(cleaned) > 80 or not cleaned:
+    cleaned = cleaned.replace("’", "'").replace("‘", "'")
+    if not cleaned:
+        return None
+    folded = cleaned.casefold()
+    for alias in EXCLUDED_SECTION_ALIASES:
+        if folded == alias.casefold() or folded.startswith(alias.casefold() + " ") or folded.startswith(alias.casefold() + ":"):
+            return "excluded"
+    if len(cleaned) > 80:
         return None
     for kind, aliases in SECTION_ALIASES.items():
         if cleaned.casefold() in {alias.casefold() for alias in aliases}:
@@ -36,6 +56,11 @@ def parse_sections(pages: Iterable[Any]) -> dict[str, dict[str, Any]]:
         for raw_line in page_text.splitlines():
             line = raw_line.strip()
             kind = _heading_kind(line)
+            if kind == "excluded":
+                # 署名、资助、伦理和出版声明从这里开始不再进入任何
+                # 后续章节，避免污染摘取式摘要和结论候选。
+                current = None
+                continue
             if kind:
                 if kind == "references" and "references" not in sections:
                     sections[kind] = {"title": line, "text": "", "page_start": page_number, "page_end": page_number}
