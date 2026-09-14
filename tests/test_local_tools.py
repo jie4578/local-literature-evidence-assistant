@@ -170,6 +170,20 @@ def test_display_removes_controls_but_raw_is_preserved_and_flagged(tmp_path):
     assert "raw_control_character_removed_for_display" in flags
 
 
+def test_fact_with_section_heading_prefix_is_assigned_to_that_section():
+    pages = [{
+        "source_file": "heading.pdf", "page_number": 1,
+        "raw_text": "Results\nThe observed response increased: R² = 0.92, α and β were ≤ 1.0 and ≥ 0.1, with p = 0.001.",
+        "text": "Results\nThe observed response increased: R² = 0.92, α and β were ≤ 1.0 and ≥ 0.1, with p = 0.001.",
+        "display_text": "Results\nThe observed response increased: R² = 0.92, α and β were ≤ 1.0 and ≥ 0.1, with p = 0.001.",
+    }]
+    facts = extract_scientific_facts(pages)
+    sections = {"results": {"title": "Results", "text": "The observed response increased: R² = 0.92, α and β were ≤ 1.0 and ≥ 0.1, with p = 0.001.", "page_start": 1, "page_end": 1}}
+    from local_extractor import _assign_fact_sections
+    _assign_fact_sections(facts, sections)
+    assert facts and all(fact["section"] == "results" for fact in facts)
+
+
 def test_unicode_exports_round_trip(tmp_path):
     value = [{"evidence_quote_raw": "µ °C ± α β ≤ ≥ – − ²", "evidence_quote_display": "µ °C ± α β ≤ ≥ – − ²"}]
     json_path = export_json(value, tmp_path / "unicode.json")

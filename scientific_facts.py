@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Iterable
 
 
@@ -11,7 +12,7 @@ RULES = {
     "group_count": r"\b(?:two|three|\d+)\s+(?:groups?|arms?)\b|(?:assigned|randomized|allocated)\s+to\s+the\s+[^.]{0,100}\s+and\s+[^.]{0,100}\s+groups?",
     "temperature": r"\b(?:at|to|stored at)\s*-?\d+(?:\.\d+)?\s*(?:degrees?\s*)?(?:C|F|Celsius|Fahrenheit)\b|\b\d+(?:\.\d+)?\s*°\s*[CF]\b",
     "time": r"\b(?:for|over|lasted?)\s+(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:days?|weeks?|months?|hours?|years?)\b",
-    "concentration": r"\b\d+(?:\.\d+)?\s*(?:mg/mL|mg/L|µg/mL|ug/mL|mM|µM|uM|%)\b",
+    "concentration": r"\b\d+(?:\.\d+)?\s*(?:mg/mL|mg/L|[µμ]g/mL|ug/mL|mM|[µμ]M|uM|%)\b",
     "dose": r"\b(?:dose|dosed|dosage)\w*\s*(?:of|was|=)?\s*\d+(?:\.\d+)?\s*(?:mg/kg|mg|g|µg|ug)\b",
     "p_value": r"\bp\s*[<=>]\s*0?\.\d+\b",
     "confidence_interval": r"\b(?:95%\s*)?(?:CI|confidence interval)\s*[:=]?\s*\(?\s*[-\d.]+\s*(?:to|–|-|,)\s*[-\d.]+\s*\)?",
@@ -66,7 +67,10 @@ def _raw_quote_for_display(display_sentence: str, raw_text: str) -> str | None:
             return match.group(0)
     for candidate in _sentences(raw_text):
         normalized_candidate = re.sub(r"\s+", " ", candidate).strip()
-        if normalized_target in normalized_candidate or normalized_candidate in normalized_target:
+        # NFKC 只用于定位 Unicode 等价字符（例如 µ/μ），返回值仍是 raw 原文。
+        target_nfkc = unicodedata.normalize("NFKC", normalized_target)
+        candidate_nfkc = unicodedata.normalize("NFKC", normalized_candidate)
+        if target_nfkc in candidate_nfkc or candidate_nfkc in target_nfkc:
             return candidate
     return display_sentence if display_sentence in raw_text else None
 

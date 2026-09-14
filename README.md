@@ -27,6 +27,9 @@ Local Offline 已通过两篇公开真实 PDF 验收，适合 Limited Local Pilo
 - SQLite FTS5 本地全文检索；
 - 只摘取原句的摘取式摘要；
 - 多论文结构化对比；
+- 可选报告模式：自动选择、仅单篇报告、简洁对比、文献库汇总，或仅导出 Excel/JSON；
+- 4 篇以上自动使用一篇论文一行的纵向汇总，超过 10 篇的 Word 只展示代表性论文；
+- 大批量离线批次支持 `batch_manifest.json`、逐篇结果缓存、暂停和续跑；
 - JSON、CSV、Excel、Word 导出；
 - 可选 DeepSeek、OpenAI、Ollama 和 Custom OpenAI-Compatible Provider。
 
@@ -74,15 +77,18 @@ python -m venv .venv
 2. 上传一篇或多篇文字版 PDF。
 3. 点击“开始处理”，查看分页提取、章节、事实和证据页码。
 4. 使用本地证据搜索查找关键词或统计表达式。
-5. 下载 JSON、CSV、Excel 或 Word 结构化结果。
-6. 如主动选择 AI Provider，填写服务商、模型和配置，并确认论文文本会离开本机。
-7. 重要结果根据 PDF 页码回查原文。
+5. 在“报告模式”中选择单篇、简洁对比、文献库汇总或跳过 Word。
+6. 下载 JSON、CSV、Excel 或 Word 结构化结果；大批量任务的完整数据以 JSON/Excel 为准。
+7. 如主动选择 AI Provider，先勾选具体论文、查看本地请求估算，再确认论文文本会离开本机。
+8. 重要结果根据 PDF 页码回查原文。
 
 ## 项目结构
 
 ```text
 paper_claude.py       Gradio 兼容入口和界面
 paper_pipeline.py     分页、chunk 和 AI Map-Reduce 管线
+report_modes.py       报告模式和布局规划
+batch_manager.py      本地批次缓存、暂停和续跑
 providers/            Provider 接口、注册和适配器
 local_extractor.py    本地 PDF 提取和元数据
 section_parser.py     保守章节识别
@@ -100,7 +106,7 @@ docs/images/          README 截图位置
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-当前版本测试结果：116 passed。测试不调用真实 DeepSeek API。
+当前版本测试结果：123 passed。测试不调用真实 DeepSeek API。
 
 ## 技术亮点
 

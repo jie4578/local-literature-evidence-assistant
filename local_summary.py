@@ -64,7 +64,17 @@ def compare_papers(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
     for paper in papers:
         facts = paper.get("facts", [])
-        row = {"file_name": paper.get("file_name")}
+        row = {
+            "file_name": paper.get("file_name"),
+            "document_id": paper.get("document_id"),
+            "content_sha256": paper.get("content_sha256"),
+            "source_alias": paper.get("source_alias"),
+            "selection_strategy": paper.get("selection_strategy"),
+            "included_in_word": paper.get("included_in_word", False),
+            "selection_rank": paper.get("selection_rank"),
+            "selection_score": paper.get("selection_score"),
+            "selection_reason": paper.get("selection_reason"),
+        }
         row.update({field: paper.get(field) for field in fields})
         if not row.get("sample_size"):
             row["sample_size"] = sample_text(facts)

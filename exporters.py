@@ -15,8 +15,43 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
+from report_modes import report_layout_plan, select_word_papers
+from storage import atomic_write_json
+
 
 DISPLAY_LABELS = {
+    "file_name": "文件名",
+    "title_candidate": "论文标题",
+    "author_candidate": "第一作者",
+    "year_candidate": "年份",
+    "doi": "DOI",
+    "research_object": "研究对象",
+    "sample_size": "样本量",
+    "research_methods_keywords": "研究方法",
+    "experimental_conditions": "实验条件",
+    "statistical_information": "统计信息",
+    "major_results_original": "主要结果",
+    "limitations_original": "局限性",
+    "conclusion_original": "研究结论",
+    "source_pages": "来源页码",
+    "missing_fields": "缺失字段",
+    "document_id": "文档标识",
+    "content_sha256": "内容指纹",
+    "source_alias": "来源别名",
+    "selection_strategy": "展示选择策略",
+    "included_in_word": "是否纳入 Word",
+    "selection_rank": "展示排序",
+    "selection_score": "展示评分",
+    "selection_reason": "展示选择原因",
+    "input_id": "输入标识",
+    "display_name": "显示名称",
+    "status": "状态",
+    "duplicate_of": "重复于",
+    "input_ids": "输入映射",
+    "result_file": "结果文件",
+    "errors": "错误",
+    "individual_report": "独立报告",
+    "text_quality_flags": "文本质量标记",
     "sample_size": "样本量",
     "time": "时间条件",
     "temperature": "温度条件",
@@ -51,9 +86,32 @@ DISPLAY_LABELS = {
     "unresolved_line_break_hyphen": "跨行断词无法安全恢复",
 }
 
+STATUS_LABELS = {
+    "completed": "已完成",
+    "failed": "失败",
+    "duplicate": "重复输入",
+    "pending": "待处理",
+    "running": "处理中",
+    "skipped": "已跳过",
+}
+
+
+def _human_label(value: Any) -> str:
+    if not isinstance(value, str):
+        return str(value)
+    if value in DISPLAY_LABELS:
+        return DISPLAY_LABELS[value]
+    if value in STATUS_LABELS:
+        return STATUS_LABELS[value]
+    if "_" in value:
+        return value.replace("_", " ")
+    return value
+
 
 def _display_token(value: Any) -> Any:
-    return DISPLAY_LABELS.get(value, value) if isinstance(value, str) else value
+    if not isinstance(value, str):
+        return value
+    return DISPLAY_LABELS.get(value, STATUS_LABELS.get(value, value))
 
 
 def _evidence_category_label(item: dict[str, Any], category: Any) -> str:
@@ -68,10 +126,7 @@ def _evidence_category_label(item: dict[str, Any], category: Any) -> str:
 
 
 def export_json(value: Any, path: str | Path) -> Path:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    return target
+    return atomic_write_json(value, path)
 
 
 def export_csv(rows: list[dict[str, Any]], path: str | Path) -> Path:
@@ -86,25 +141,79 @@ def export_csv(rows: list[dict[str, Any]], path: str | Path) -> Path:
     return target
 
 
-def export_excel(rows: list[dict[str, Any]], path: str | Path) -> Path:
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    workbook = Workbook()
-    sheet = workbook.active
-    keys = list(rows[0].keys()) if rows else []
-    sheet.append(keys)
-    for row in rows:
-        sheet.append([_flat_value(row.get(key)) for key in keys])
+def _style_worksheet(sheet, headers: list[str]) -> None:
+    from openpyxl.styles import Alignment, Font
+
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions if keys else None
+    sheet.auto_filter.ref = sheet.dimensions if headers else None
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
     for column in sheet.columns:
         values = [str(cell.value or "") for cell in column]
         width = min(48, max(12, max((len(value) for value in values), default=12) + 2))
         sheet.column_dimensions[column[0].column_letter].width = width
         for cell in column:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def export_excel(
+    rows: list[dict[str, Any]],
+    path: str | Path,
+    inputs: list[dict[str, Any]] | None = None,
+    documents: list[dict[str, Any]] | None = None,
+) -> Path:
+    from openpyxl import Workbook
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "文献汇总"
+    summary_columns = (
+        ("file_name", "文件名"), ("title_candidate", "论文标题"), ("author_candidate", "第一作者"),
+        ("year_candidate", "年份"), ("doi", "DOI"), ("research_object", "研究对象"),
+        ("sample_size", "样本量"), ("research_methods_keywords", "研究方法"),
+        ("experimental_conditions", "实验条件"), ("statistical_information", "统计信息"),
+        ("major_results_original", "主要结果"), ("limitations_original", "局限性"),
+        ("conclusion_original", "研究结论"), ("source_pages", "来源页码"), ("missing_fields", "缺失字段"),
+    )
+    if inputs is None:
+        # 保留旧的通用导出调用能力；批量报告始终传 inputs，使用结构化中文列。
+        legacy_columns = list(rows[0].keys()) if rows else []
+        sheet.append([_human_label(key) for key in legacy_columns])
+        for row in rows:
+            sheet.append([_flat_value(row.get(key)) for key in legacy_columns])
+        _style_worksheet(sheet, [_human_label(key) for key in legacy_columns])
+    else:
+        sheet.append([label for _, label in summary_columns])
+        for row in rows:
+            sheet.append([_flat_value(row.get(key)) for key, _ in summary_columns])
+        _style_worksheet(sheet, [label for _, label in summary_columns])
+    if inputs is not None:
+        input_sheet = workbook.create_sheet("输入映射")
+        input_columns = (
+            ("input_id", "输入标识"), ("display_name", "显示名称"), ("source_alias", "来源别名"),
+            ("content_sha256", "内容指纹"), ("document_id", "文档标识"), ("status", "状态"),
+            ("duplicate_of", "重复于"),
+        )
+        input_sheet.append([label for _, label in input_columns])
+        for item in inputs:
+            input_sheet.append([
+                _flat_value(STATUS_LABELS.get(item.get(key), item.get(key)) if key == "status" else item.get(key))
+                for key, _ in input_columns
+            ])
+        _style_worksheet(input_sheet, [label for _, label in input_columns])
+        technical_sheet = workbook.create_sheet("技术明细")
+        technical_columns = (
+            "document_id", "content_sha256", "source_alias", "input_ids", "status", "result_file",
+            "errors", "selection_strategy", "included_in_word", "selection_rank", "selection_score",
+            "selection_reason", "individual_report",
+        )
+        technical_sheet.append(list(technical_columns))
+        technical_rows = documents if documents is not None else rows
+        for item in technical_rows:
+            technical_sheet.append([_flat_value(item.get(key)) for key in technical_columns])
+        _style_worksheet(technical_sheet, list(technical_columns))
     workbook.save(target)
     return target
 
@@ -119,7 +228,7 @@ def _flat_value(value: Any) -> str:
         joiner = "；" if any(re.search(r"[\u3400-\u9fff]", part) for part in parts) else "; "
         return joiner.join(parts)
     if isinstance(value, dict):
-        return "；".join(f"{key}: {_flat_value(item)}" for key, item in value.items())
+        return "；".join(f"{_human_label(key)}: {_flat_value(item)}" for key, item in value.items())
     return str(_display_token(value)).replace("**", "")
 
 
@@ -523,6 +632,8 @@ def export_word(
     papers: list[dict[str, Any]] | None = None,
     report_mode: str = "Local Offline",
     final_review: dict[str, Any] | None = None,
+    report_layout_mode: str = "自动选择",
+    full_data_filename: str | None = None,
 ) -> Path:
     """导出紧凑的用户报告，保留英文证据和 PDF 物理页码。"""
     target = Path(path)
@@ -558,7 +669,15 @@ def export_word(
     meta = document.add_paragraph()
     meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _set_no_mid_word_breaks(meta)
-    meta_run = meta.add_run(f"生成模式：{report_mode}　论文数量：{len(rows)}")
+    requested_layout = report_layout_mode
+    if requested_layout == "自动选择" and report_mode in {
+        "自动选择", "仅单篇报告", "简洁对比", "文献库汇总", "不生成 Word，仅导出 Excel/JSON",
+    }:
+        requested_layout = report_mode
+    layout_plan = report_layout_plan(requested_layout, len(rows))
+    meta_run = meta.add_run(
+        f"生成模式：{report_mode}　报告布局：{layout_plan['resolved_mode']}　论文数量：{len(rows)}"
+    )
     _set_run_font(meta_run, size=9, color="666666")
     if report_mode == "Local Offline":
         notice = "当前为 Local Offline 报告，未启用语义翻译；英文证据原文和 PDF 物理页码已保留。verified 仅表示原文匹配，不代表科研结论已被证明。"
@@ -570,27 +689,84 @@ def export_word(
         _set_run_font(run, size=9)
 
     paper_list = papers or rows
+    row_by_document_id = {
+        str(row.get("document_id")): row
+        for row in rows
+        if row.get("document_id")
+    }
+    paper_infos = []
+    for index, paper in enumerate(paper_list):
+        row = row_by_document_id.get(str(paper.get("document_id")))
+        if row is None:
+            row = rows[index] if index < len(rows) else {}
+        paper_infos.append((row, paper))
+    selection_records = select_word_papers(list(paper_list), max_papers=10)
+    selection_by_id = {record["document_id"]: record for record in selection_records}
+    selection_by_file = {
+        str(paper.get("file_name")): record
+        for paper, record in zip(paper_list, selection_records)
+        if paper.get("file_name")
+    }
+    selection_by_object_id = {
+        id(paper): record
+        for paper, record in zip(paper_list, selection_records)
+    }
+
+    def selection_for(paper: dict[str, Any]) -> dict[str, Any]:
+        return (
+            selection_by_id.get(str(paper.get("document_id")))
+            or selection_by_file.get(str(paper.get("file_name")))
+            or selection_by_object_id.get(id(paper), {})
+        )
     comparison_keys = (
         ("title_candidate", "标题"), ("author_candidate", "第一作者"), ("year_candidate", "年份"),
         ("doi", "DOI"), ("research_object", "研究对象"), ("sample_size", "样本量"),
         ("research_methods_keywords", "研究方法"), ("major_results_original", "主要结果"),
         ("limitations_original", "局限性"), ("conclusion_original", "结论"),
     )
-    if len(rows) > 1:
+    if layout_plan["show_comparison"] and layout_plan["layout"] == "matrix":
         _add_heading(document, "多论文对比", 2)
-        for batch_start in range(0, len(rows), 2):
-            batch_rows = rows[batch_start:batch_start + 2]
-            batch_papers = paper_list[batch_start:batch_start + 2]
-            table_rows = []
-            for key, label in comparison_keys:
-                values = [label]
-                for row, paper in zip(batch_rows, batch_papers):
-                    values.append(_comparison_value(row, key, paper))
-                table_rows.append(values)
-            if batch_start:
-                _add_heading(document, f"多论文对比（第 {batch_start + 1}–{batch_start + len(batch_rows)} 篇）", 3)
-            headers = ["对比维度"] + [f"论文 {batch_start + i + 1}\n{row.get('file_name') or '未命名文件'}" for i, row in enumerate(batch_rows)]
-            _add_table(document, headers, table_rows, [1.15] + [3.0] * len(batch_rows))
+        table_rows = []
+        for key, label in comparison_keys:
+            values = [label]
+            for row, paper in paper_infos:
+                values.append(_comparison_value(row, key, paper))
+            table_rows.append(values)
+        headers = ["对比维度"] + [f"论文 {index + 1}\n{row.get('file_name') or '未命名文件'}" for index, (row, _) in enumerate(paper_infos)]
+        if len(rows) == 2:
+            widths = [1.15, 3.0, 3.0]
+        else:
+            widths = [1.0] + [2.05] * len(rows)
+        _add_table(document, headers, table_rows, widths)
+    elif layout_plan["show_comparison"] and layout_plan["layout"] == "vertical":
+        _add_heading(document, "文献库纵向汇总", 2)
+        vertical_rows = []
+        for index, (row, paper) in enumerate(paper_infos, 1):
+            title = paper.get("title_candidate") or row.get("title_candidate") or "未提取到"
+            author = paper.get("author_candidate") or row.get("author_candidate") or "未提取到"
+            year = paper.get("year_candidate") or row.get("year_candidate") or "未提取到"
+            doi = paper.get("doi") or row.get("doi") or "未提取到"
+            basic = f"标题：{title}\n第一作者：{author}\n年份：{year}\nDOI：{doi}"
+            object_sample = (
+                f"研究对象：{_research_object_display(row.get('research_object')) or '未提取到'}\n"
+                f"样本量：{_flat_value(row.get('sample_size'))}"
+            )
+            results = _major_results(paper, row)[:3]
+            conclusion = _conclusions(paper, row)[:1]
+            result_text = "\n".join([*(f"• {value}" for value in results), *(f"结论：{value}" for value in conclusion)])
+            vertical_rows.append([f"论文 {index}\n{row.get('file_name') or paper.get('file_name') or '未命名文件'}", basic, object_sample, result_text or "未提取到"])
+        _add_table(
+            document,
+            ["论文", "基础信息", "研究对象与样本量", "主要结果与结论"],
+            vertical_rows,
+            [0.85, 2.45, 1.45, 2.45],
+        )
+        if full_data_filename:
+            readable_reference = str(full_data_filename).replace("_", " ")
+            note = document.add_paragraph(f"完整数据请查看：{readable_reference}。每篇论文的详细证据保存在独立报告目录。")
+            _set_no_mid_word_breaks(note)
+            for run in note.runs:
+                _set_run_font(run, size=9, color="666666")
 
     if final_review:
         labels = {"research_theme_overview": "研究主题概述", "major_methods": "主要研究方法", "common_conclusions": "共同结论", "different_or_conflicting_conclusions": "不同或冲突结论", "research_gaps": "研究空白", "future_recommendations": "后续研究建议"}
@@ -599,9 +775,22 @@ def export_word(
             if final_review.get(key):
                 _add_field_paragraph(document, label, final_review[key])
 
-    detail_papers = paper_list
-    for index, paper in enumerate(detail_papers):
-        row = rows[index] if index < len(rows) else {}
+    selected_infos = [
+        info for info in paper_infos
+        if selection_for(info[1]).get("included_in_word")
+    ]
+    selected_infos.sort(key=lambda info: selection_for(info[1]).get("selection_rank") or 9999)
+    detail_infos = selected_infos[:layout_plan["max_word_papers"]]
+    detail_papers = [paper for _, paper in detail_infos]
+    if len(paper_list) > len(detail_papers) and full_data_filename:
+        note = document.add_paragraph(
+            f"由于论文数量较多，正文仅展示按数据完整度和证据覆盖率选出的 {len(detail_papers)} 篇论文；"
+            f"该选择不代表学术重要性，完整 {len(paper_list)} 篇数据请查看：{str(full_data_filename).replace('_', ' ')}。"
+        )
+        _set_no_mid_word_breaks(note)
+        for run in note.runs:
+            _set_run_font(run, size=9, color="666666")
+    for index, (row, paper) in enumerate(detail_infos):
         _add_heading(document, f"论文详情 {index + 1}", 2)
         _add_table(document, ["字段", "内容"], [
             ("论文标题", paper.get("title_candidate") or row.get("title_candidate") or paper.get("file_name") or row.get("file_name")),
@@ -684,3 +873,36 @@ def export_word(
     _set_run_font(tail, size=9, color="666666")
     document.save(target)
     return target
+
+
+def export_individual_reports(
+    rows: list[dict[str, Any]],
+    papers: list[dict[str, Any]],
+    directory: str | Path,
+) -> list[Path]:
+    """为大批量任务保存每篇论文的详细 Word 报告。"""
+    target_dir = Path(directory)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    row_by_document_id = {str(row.get("document_id")): row for row in rows if row.get("document_id")}
+    for index, paper in enumerate(papers, 1):
+        if paper.get("errors") or paper.get("status") in {"failed", "duplicate", "skipped"}:
+            continue
+        row = row_by_document_id.get(str(paper.get("document_id")))
+        if row is None and index - 1 < len(rows):
+            row = rows[index - 1]
+        row = row or {}
+        source = str(paper.get("file_name") or row.get("file_name") or "paper")
+        stem = re.sub(r"[^\w\-一-龥]+", "_", Path(source).stem, flags=re.UNICODE).strip("_") or "paper"
+        document_id = str(paper.get("document_id") or row.get("document_id") or f"paper_{index}")
+        path = target_dir / f"{stem[:70]}_{document_id[:12]}.docx"
+        export_word(
+            [row],
+            path,
+            papers=[paper],
+            report_mode="Local Offline",
+            report_layout_mode="仅单篇报告",
+        )
+        paper["individual_report"] = str(path.relative_to(target_dir.parent)).replace("\\", "/")
+        paths.append(path)
+    return paths
