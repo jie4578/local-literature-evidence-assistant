@@ -28,6 +28,7 @@ DISPLAY_LABELS = {
     "research_object": "研究对象",
     "sample_size": "样本量",
     "research_methods_keywords": "研究方法",
+    "research_methods_original": "研究方法",
     "experimental_conditions": "实验条件",
     "statistical_information": "统计信息",
     "major_results_original": "主要结果",
@@ -55,6 +56,7 @@ DISPLAY_LABELS = {
     "sample_size": "样本量",
     "time": "时间条件",
     "temperature": "温度条件",
+    "concentration": "浓度条件",
     "p": "统计结果",
     "p_value": "统计结果",
     "research_method": "研究方法",
@@ -172,7 +174,7 @@ def export_excel(
     summary_columns = (
         ("file_name", "文件名"), ("title_candidate", "论文标题"), ("author_candidate", "第一作者"),
         ("year_candidate", "年份"), ("doi", "DOI"), ("research_object", "研究对象"),
-        ("sample_size", "样本量"), ("research_methods_keywords", "研究方法"),
+        ("sample_size", "样本量"), ("research_methods_original", "研究方法"),
         ("experimental_conditions", "实验条件"), ("statistical_information", "统计信息"),
         ("major_results_original", "主要结果"), ("limitations_original", "局限性"),
         ("conclusion_original", "研究结论"), ("source_pages", "来源页码"), ("missing_fields", "缺失字段"),
@@ -612,11 +614,38 @@ def _research_object_display(value: Any) -> Any:
     return value
 
 
+def _method_evidence(paper: dict[str, Any], row: dict[str, Any]) -> list[str]:
+    """将方法分类转换为已提取的原文证据，避免把分类名当作内容。"""
+    method_categories = {
+        "research_method", "model_fit", "r_square", "randomization", "double_blind",
+        "control_group", "group_count", "immunocapture_lc_ms", "affinity_purification_lc_ms",
+        "single_dose_pk", "multiple_dose_pk", "randomized_controlled_trial", "dietary_intervention",
+    }
+    values: list[str] = []
+    for fact in paper.get("facts", []) or []:
+        if fact.get("category") not in method_categories:
+            continue
+        if fact.get("section") == "results" and fact.get("category") in {"research_method", "model_fit", "r_square"}:
+            continue
+        value = re.sub(r"\s+", " ", str(fact.get("evidence_quote_display") or fact.get("evidence_quote") or "")).strip()
+        if value and value not in values:
+            values.append(value)
+    if values:
+        return values[:3]
+    # 章节原句由 local_summary 预先保守抽取；这里只接受真实文本，不回退到分类名。
+    fallback = []
+    for value in row.get("research_methods_original") or []:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if text and text not in {"研究方法", "research_method"} and text not in fallback:
+            fallback.append(text)
+    return fallback[:3]
+
+
 def _comparison_value(row: dict[str, Any], key: str, paper: dict[str, Any] | None = None) -> Any:
     if key == "research_object":
         return _research_object_display(row.get(key))
     if key == "research_methods_keywords":
-        return row.get(key)
+        return row.get("research_methods_original") or "未提取到"
     if key == "major_results_original":
         return _major_results(paper or {}, row)
     if key == "limitations_original":
@@ -801,7 +830,8 @@ def export_word(
         labels = (("research_object", "研究对象"), ("sample_size", "样本量说明"), ("research_methods_keywords", "研究方法"),
                   ("experimental_conditions", "实验条件"))
         for key, label in labels:
-            value = paper.get(key, row.get(key))
+            field_key = "research_methods_original" if key == "research_methods_keywords" else key
+            value = row.get(field_key)
             if value:
                 _add_field_paragraph(document, label, _research_object_display(value) if key == "research_object" else value)
         _add_heading(document, "统计信息", 3)

@@ -10,6 +10,158 @@ from scientific_facts import repair_visual_word_breaks
 
 LANGUAGE_OPTIONS = ("原文", "中文摘要＋英文证据（推荐）", "中英对照")
 
+_METHOD_SECTION_KEYS = {"methods", "methodology", "materials_and_methods"}
+_METHOD_FACT_CATEGORIES = {
+    "research_method", "model_fit", "r_square", "randomization", "double_blind",
+    "control_group", "group_count", "immunocapture_lc_ms", "affinity_purification_lc_ms",
+    "single_dose_pk", "multiple_dose_pk", "randomized_controlled_trial", "dietary_intervention",
+}
+_METHOD_SEMANTIC_RE = re.compile(
+    r"\b(?:used|measured|analy[sz]ed|fitt?(?:ed|ing)?|performed|assigned|collected|estimated|calculated|modeled|modelled)\b",
+    re.IGNORECASE,
+)
+_RESULT_ONLY_RE = re.compile(
+    r"\b(?:observed|increased|decreased|higher|lower|retained|improved|reduced|greater|unchanged|remained|unaffected|stable)\b|"
+    r"\bp\s*[<=>]|\bR\s*(?:square|squared|2|²)\b",
+    re.IGNORECASE,
+)
+_NON_METHOD_SECTION_RE = re.compile(
+    r"^(?:keywords?|correspondence|acknowledg(?:e)?ments?|funding|availability of data and materials|"
+    r"ethics approval|consent for publication|competing interests|publisher['’]s note)\b",
+    re.IGNORECASE,
+)
+
+
+def _method_sentence_candidates(text: Any) -> list[str]:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    return [part.strip() for part in re.split(r"(?<=[.!?。！？])\s+", compact) if part.strip()]
+
+
+def _strip_section_prefix(value: str) -> str:
+    return re.sub(r"^(?:Methods?|Methodology|Materials\s+and\s+Methods?)\s+", "", value, flags=re.IGNORECASE).strip()
+
+
+def _clean_sentence(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = _strip_section_prefix(text)
+    text = re.sub(r"(?:\s*[.;；]+)+$", ".", text)
+    return text
+
+
+def _sentence_key(value: Any) -> str:
+    text = _clean_sentence(value)
+    # Treat common Chinese/English punctuation variants and punctuation
+    # spacing as equivalent before comparing sentence-level evidence.
+    text = (
+        text.replace("；", ";")
+        .replace("。", ".")
+        .replace("：", ":")
+        .replace("，", ",")
+        .replace("！", "!")
+        .replace("？", "?")
+    )
+    text = re.sub(r"\s*([,;:.!?])\s*", r"\1", text)
+    text = re.sub(r"[.!?。！？；;]+$", "", text).strip()
+    return text.casefold()
+
+
+def _with_section_prefix(sentence: str, section_key: str) -> str:
+    prefix = {
+        "methods": "Methods",
+        "methodology": "Methodology",
+        "materials_and_methods": "Materials and Methods",
+    }.get(section_key, "Methods")
+    if re.match(r"^(?:Methods?|Methodology|Materials\s+and\s+Methods?)\b", sentence, re.IGNORECASE):
+        return sentence
+    return f"{prefix} {sentence}"
+
+
+def _method_sentence_is_safe(sentence: str) -> bool:
+    sentence = _clean_sentence(sentence)
+    if len(sentence) < 12 or not re.search(r"[.!?。！？]$", sentence):
+        return False
+    if _NON_METHOD_SECTION_RE.match(sentence):
+        return False
+    # 结果信号或 R²/p 值本身不能把结果句冒充为方法；明确方法语义仍可保留。
+    if _RESULT_ONLY_RE.search(sentence) and not _METHOD_SEMANTIC_RE.search(sentence):
+        return False
+    return True
+
+
+def _page_contains_method_sentence(paper: dict[str, Any], sentence: str) -> bool:
+    pages = paper.get("pages") or []
+    if not pages:
+        return True
+    target = re.sub(r"\s+", " ", sentence).strip()
+    for page in pages:
+        source = page.get("display_text") or page.get("text") or page.get("raw_text") or ""
+        if target in re.sub(r"\s+", " ", str(source)).strip():
+            return True
+    return False
+
+
+def _collect_method_evidence(paper: dict[str, Any]) -> list[str]:
+    """只从 Methods 原句或已验证方法事实中选择用户可读内容。"""
+    ranked: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    order = 0
+    for fact in paper.get("facts", []) or []:
+        category = fact.get("category")
+        section = str(fact.get("section") or "").casefold()
+        if category not in _METHOD_FACT_CATEGORIES or fact.get("verified") is not True:
+            continue
+        if category in {"research_method", "model_fit", "r_square"} and section == "results":
+            continue
+        value = _clean_sentence(fact.get("evidence_quote_display") or fact.get("evidence_quote") or "")
+        if not value or value in seen or not _method_sentence_is_safe(value):
+            continue
+        key = _sentence_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        ranked.append((3 if section in _METHOD_SECTION_KEYS else 2, order, value))
+        order += 1
+
+    sections = paper.get("sections") or {}
+    for key in ("methods", "methodology", "materials_and_methods"):
+        section = sections.get(key) or {}
+        section_sentences = _method_sentence_candidates(section.get("text"))
+        section_values: list[tuple[int, str]] = []
+        for index, sentence in enumerate(section_sentences):
+            sentence = _clean_sentence(sentence)
+            if not _method_sentence_is_safe(sentence):
+                continue
+            display_sentence = _with_section_prefix(sentence, key) if index == 0 else sentence
+            if not _page_contains_method_sentence(paper, display_sentence):
+                continue
+            if _RESULT_ONLY_RE.search(sentence) and not _METHOD_SEMANTIC_RE.search(sentence):
+                continue
+            # 明确方法语义优先；纯条件句留作无方法句时的最后保守兜底。
+            condition_only = bool(re.search(
+                r"\b(?:stored|temperature|degrees?|exposure|concentration|dose|for\s+\d+\s+weeks?)\b",
+                sentence,
+                re.IGNORECASE,
+            )) and not re.search(r"\b(?:used|measured|analy[sz]ed|fitted|performed|assigned)\b", sentence, re.IGNORECASE)
+            score = 2 if _METHOD_SEMANTIC_RE.search(sentence) else (0 if condition_only else 1)
+            section_values.append((score, display_sentence))
+            order += 1
+        for score, value in section_values:
+            key_value = _sentence_key(value)
+            if key_value in seen:
+                continue
+            seen.add(key_value)
+            ranked.append((score, order, value))
+            order += 1
+
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    preferred = [item for item in ranked if item[0] >= 2]
+    if preferred:
+        ranked = preferred
+    elif ranked:
+        # 只有章节正文、没有显式方法动词时，保留第一条可回查完整句。
+        ranked = [ranked[0]]
+    return [value for _, _, value in ranked[:3]]
+
 
 def compare_papers(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """生成不改写原文的对比行，并在回填后再计算 missing_fields。"""
@@ -44,6 +196,18 @@ def compare_papers(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             score = (4 if re.search(r"\b(?:enrolled|randomi[sz]ed|allocated)\b", merged, re.I) else 1)
             if re.search(r"\bn\s*=\s*\d", merged, re.I):
                 score += 2
+            primary = re.search(
+                r"\b\d[\d,]*\s+(?:independent\s+)?(?:samples?|participants?|subjects?|patients?)\b",
+                merged,
+                re.IGNORECASE,
+            )
+            compact = primary.group(0) if primary else None
+            if compact:
+                group_counts = re.findall(r"\b(?:n\s*=\s*\d[\d,]*)\b", merged, re.IGNORECASE)
+                for count in group_counts:
+                    if count.casefold() not in compact.casefold():
+                        compact += f"; {count}"
+                merged = compact
             candidates.append((score, merged))
         if not candidates:
             return None
@@ -98,9 +262,26 @@ def compare_papers(papers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         for keyword, pattern in method_patterns:
             if re.search(pattern, method_text, re.IGNORECASE) and keyword not in method_keywords:
                 method_keywords.append(keyword)
+        method_evidence = _collect_method_evidence(paper)
+        condition_values: list[str] = []
+        for fact in facts:
+            if fact.get("category") not in {"temperature", "time", "concentration", "dose"}:
+                continue
+            value = _clean_sentence(fact.get("evidence_quote_display", fact.get("evidence_quote", "")))
+            if fact.get("section") not in {"abstract", "methods", "methodology", "materials_and_methods"} or not value:
+                continue
+            # 含参与者和研究时长的复合句归入样本/方法，不冒充纯实验条件。
+            if fact.get("category") == "time" and re.search(r"\b(?:included|enrolled|participants?|subjects?|patients?|sample)\b", value, re.IGNORECASE):
+                continue
+            if _sentence_key(value) in {_sentence_key(item) for item in method_evidence}:
+                continue
+            if _sentence_key(value) not in {_sentence_key(item) for item in condition_values}:
+                condition_values.append(value)
+        experimental_conditions = condition_values
         row.update({
             "research_methods_keywords": method_keywords,
-            "experimental_conditions": quotes(facts, {"temperature", "time", "concentration", "dose"}, {"abstract", "methods"}),
+            "research_methods_original": method_evidence,
+            "experimental_conditions": experimental_conditions,
             "statistical_information": quotes(facts, {"p_value", "confidence_interval", "mean_sd"}, {"abstract", "methods", "results"}),
             "major_results_original": quotes(facts, {"major_result"}, {"results"}),
             "conclusion_original": quotes(facts, {"conclusion"}, {"abstract", "conclusion", "discussion"}),
