@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.3.0-bilingual-corpus-preview]
+
+预览版本，预留 Tag 名称 `v0.3.0-bilingual-corpus-preview`。不是稳定版，也不是科研生产级版本。
+
+### Added
+
+- 多报告模式：自动选择、仅单篇报告、简洁对比、文献库汇总，以及仅导出 Excel/JSON；
+- 大文献库批处理：4 篇以上使用一篇论文一行的纵向汇总，列数不随论文数量增长；
+- 文件指纹和稳定 `document_id`：按内容 SHA-256 聚合，basename 只用于展示，不参与去重；
+- 输入/文档两层身份模型：同名不同内容分别处理，同内容不同文件名识别为重复输入；
+- 暂停续跑：`pause_after`、`resume_local_batch`、`pause_local_batch` 和逐篇结果缓存复用；
+- 原子 manifest 和缓存：`batch_manifest.json`、`status.json` 和逐篇结果均原子写入；
+- 独立论文报告：`export_individual_reports` 为每篇成功论文生成 Word 报告；
+- 双语展示入口：中文字段名配合英文证据原文、PDF 物理页码和 `verified` 状态；
+- 完整 Excel 输入映射和技术明细工作表，披露输入标识、内容指纹、状态、选择原因和独立报告路径。
+
+### Changed
+
+- Word 大语料布局改为纵向汇总，不再把论文数量映射为表格列数；
+- 11 篇以上只展示有记录选择原因的代表论文，最多 10 篇，其余通过结构化文件保留；
+- 研究方法和实验条件使用独立结构化字段；
+- 样本量输出改为简洁值；
+- Word/Excel 字段中文化和可读性优化。
+
+### Fixed
+
+- 同名不同内容文件错误合并；
+- 重复输入身份复用；
+- 失败论文错误生成独立报告；
+- 方法与实验条件重复；
+- `研究方法：研究方法`；
+- 异常标点；
+- Unicode 科研符号导出问题。
+
+### Security / Privacy
+
+- Local Offline 保持无网络，不创建 Provider 客户端；
+- Provider 仍采用会话隔离；
+- 不持久化 API Key，密钥不写入结果、SQLite、日志或 `.env`；
+- output、PDF、数据库和用户文件继续被 Git 忽略。
+
+### Known limitations
+
+- 仅支持文字版 PDF，扫描件无 OCR；复杂表格、公式和图像识别不稳定；
+- 规则型事实提取不等于科研事实核验，`verified=true` 只代表证据原文可在对应 PDF 页找到，不证明研究结论真实或可靠，也不替代科研人员判断；
+- 大文献库验收主要使用合成 PDF，真实论文 Local Offline 验证规模有限；
+- DeepSeek 长论文真实 Provider 测试尚未完整端到端通过；
+- OpenAI、Ollama 和 Custom Endpoint 主要完成 Mock 验证；
+- AI 长论文分析仍属于实验功能。
+
 ## v0.3.0-bilingual-report-preview
 
 - 完善 Local Offline 与中英对照报告展示；
