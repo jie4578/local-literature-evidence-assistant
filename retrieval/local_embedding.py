@@ -64,7 +64,15 @@ def _validate_matrix(
     return np.ascontiguousarray(array, dtype=np.float32)
 
 
-def _model_fingerprint(model_dir: Path, dimension: int, backend_version: str) -> str:
+def _model_fingerprint(
+    model_dir: Path,
+    dimension: int,
+    backend_version: str,
+    *,
+    query_prefix: str = "",
+    document_prefix: str = "",
+    normalize_embeddings: bool = True,
+) -> str:
     """仅哈希模型目录元数据和小型配置，不保存或哈希绝对路径/完整权重。"""
     entries: list[dict[str, Any]] = []
     config_hashes: dict[str, str] = {}
@@ -80,6 +88,9 @@ def _model_fingerprint(model_dir: Path, dimension: int, backend_version: str) ->
         "backend": "sentence-transformers",
         "backend_version": backend_version,
         "dimension": int(dimension),
+        "query_prefix": query_prefix,
+        "document_prefix": document_prefix,
+        "normalize_embeddings": bool(normalize_embeddings),
         "entries": entries,
         "config_hashes": config_hashes,
     }
@@ -95,6 +106,7 @@ class LocalSentenceTransformerEncoder:
         device: str = "cpu",
         batch_size: int = 32,
         query_prefix: str = "",
+        document_prefix: str = "",
         normalize_embeddings: bool = True,
     ):
         self.model_path = Path(model_path)
@@ -110,6 +122,7 @@ class LocalSentenceTransformerEncoder:
             ) from exc
         self.batch_size = max(1, int(batch_size))
         self.query_prefix = query_prefix or ""
+        self.document_prefix = document_prefix or ""
         self.normalize_embeddings = bool(normalize_embeddings)
         self._model = SentenceTransformer(
             str(self.model_path),
@@ -121,8 +134,16 @@ class LocalSentenceTransformerEncoder:
         if not dimension:
             raise EmbeddingDataError("本地模型未提供有效 embedding 维度")
         self.dimension = int(dimension)
+        self.max_seq_length = getattr(self._model, "max_seq_length", None)
         version = getattr(__import__("sentence_transformers"), "__version__", "unknown")
-        self.model_fingerprint = _model_fingerprint(self.model_path, self.dimension, str(version))
+        self.model_fingerprint = _model_fingerprint(
+            self.model_path,
+            self.dimension,
+            str(version),
+            query_prefix=self.query_prefix,
+            document_prefix=self.document_prefix,
+            normalize_embeddings=self.normalize_embeddings,
+        )
 
     def _encode(self, texts: Iterable[str]) -> np.ndarray:
         values = list(texts)
@@ -141,7 +162,7 @@ class LocalSentenceTransformerEncoder:
         return self._encode([f"{self.query_prefix}{text}" for text in texts])
 
     def encode_documents(self, texts: Iterable[str]) -> np.ndarray:
-        return self._encode(texts)
+        return self._encode([f"{self.document_prefix}{text}" for text in texts])
 
 
 def _context_db_path(search_context: SearchContext) -> Path:
