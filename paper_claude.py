@@ -33,6 +33,8 @@ from local_search import LocalSearchIndex, SearchContext
 from passage_retrieval import build_evidence_passages
 from batch_manager import run_local_batch, update_batch_manifest
 from report_modes import NO_WORD_MODE, REPORT_MODE_OPTIONS, report_layout_plan, select_word_papers
+from retrieval import HybridRetriever
+from retrieval.lexical import LexicalRetriever
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
@@ -393,11 +395,12 @@ def search_local_index(query, search_context=None, limit=20):
         with LocalSearchIndex(db_path_resolved) as local_index:
             if local_index.passage_count() == 0:
                 return "❌ 当前批次没有可用的证据段落索引，请重新完成 Local Offline 文献处理。"
-            rows = local_index.search_passages(
+            retrieval_response = HybridRetriever(LexicalRetriever(local_index)).search(
                 query,
                 limit=limit,
                 source_files=context.document_sources,
             )
+            rows = [result.to_dict() for result in retrieval_response.results]
     except (OSError, ValueError, sqlite3.Error):
         return "❌ 当前批次索引无法读取，请重新完成 Local Offline 文献处理。"
     if not rows:
@@ -780,7 +783,7 @@ def build_ui():
                     with gr.Tab("证据与页码"):
                         gr.Markdown("已验证：证据文本与 PDF 原文匹配；未验证：请根据 PDF 物理页码回查原文。source_type 仅表示程序对来源形态的保守判断。")
                     with gr.Tab("本地证据检索"):
-                        gr.Markdown("本地证据检索：当前批次（仅搜索最近一次 Local Offline 处理结果，不检索历史任务）。")
+                        gr.Markdown("本地证据检索：当前批次（仅搜索最近一次 Local Offline 处理结果，不检索历史任务）。\n\n检索模式：Lexical / FTS5；本阶段未启用真实语义检索后端。")
                         local_query = gr.Textbox(label="本地证据搜索", placeholder="关键词或精确短语（仅搜索本地索引）")
                         local_search_btn = gr.Button("🔎 搜索本地证据")
                         local_search_output = gr.Textbox(label="本地搜索结果", lines=8)
