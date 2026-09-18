@@ -177,6 +177,78 @@ class LocalSearchIndex:
         row = self.conn.execute("SELECT COUNT(*) FROM passage_metadata").fetchone()
         return int(row[0] if row else 0)
 
+    def _ensure_embedding_schema(self) -> None:
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS passage_embeddings ("
+            "passage_id TEXT NOT NULL, model_fingerprint TEXT NOT NULL, text_hash TEXT NOT NULL, "
+            "dimension INTEGER NOT NULL, vector_blob BLOB NOT NULL, "
+            "PRIMARY KEY (passage_id, model_fingerprint))"
+        )
+
+    def list_passages(
+        self,
+        source_files: Iterable[str] | None = None,
+        sections: Iterable[str] | None = None,
+        exclude_references: bool = True,
+    ) -> list[dict[str, Any]]:
+        """读取当前批次 passage metadata，不读取其他数据库。"""
+        self._ensure_passage_schema()
+        source_clause, source_params = self._value_filter("m.source_file", source_files)
+        normalized_sections = self._normalize_sections(sections)
+        section_clause, section_params = self._value_filter("m.section", normalized_sections)
+        reference_clause = " AND m.section <> 'References'" if exclude_references else ""
+        rows = self.conn.execute(
+            "SELECT m.passage_id,m.source_file,m.document_id,m.section,m.pdf_page_start,"
+            "m.pdf_page_end,m.text,m.ordinal FROM passage_metadata m WHERE 1 = 1"
+            f"{source_clause}{section_clause}{reference_clause} ORDER BY m.passage_id ASC",
+            tuple(source_params) + tuple(section_params),
+        ).fetchall()
+        return [
+            {
+                "passage_id": row[0],
+                "source_file": row[1],
+                "document_id": row[2],
+                "section": row[3],
+                "pdf_page_start": row[4],
+                "pdf_page_end": row[5],
+                "text": row[6],
+                "ordinal": row[7],
+            }
+            for row in rows
+        ]
+
+    def get_embedding(self, passage_id: str, model_fingerprint: str) -> dict[str, Any] | None:
+        self._ensure_embedding_schema()
+        row = self.conn.execute(
+            "SELECT passage_id,model_fingerprint,text_hash,dimension,vector_blob "
+            "FROM passage_embeddings WHERE passage_id = ? AND model_fingerprint = ?",
+            (passage_id, model_fingerprint),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "passage_id": row[0],
+            "model_fingerprint": row[1],
+            "text_hash": row[2],
+            "dimension": row[3],
+            "vector_blob": bytes(row[4]),
+        }
+
+    def upsert_embedding(
+        self,
+        passage_id: str,
+        model_fingerprint: str,
+        text_hash: str,
+        dimension: int,
+        vector_blob: bytes,
+    ) -> None:
+        self._ensure_embedding_schema()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO passage_embeddings "
+            "(passage_id,model_fingerprint,text_hash,dimension,vector_blob) VALUES(?,?,?,?,?)",
+            (passage_id, model_fingerprint, text_hash, int(dimension), sqlite3.Binary(vector_blob)),
+        )
+
     def index_pages(self, pages: Iterable[Any]) -> int:
         page_list = list(pages)
         if not page_list:
@@ -430,5 +502,6 @@ class LocalSearchIndex:
         self.conn.execute("DROP TABLE IF EXISTS passage_metadata")
         self.conn.execute("DROP TABLE IF EXISTS passages_fallback")
         self.conn.execute("DROP TABLE IF EXISTS passages_fts")
+        self.conn.execute("DROP TABLE IF EXISTS passage_embeddings")
         self.conn.commit()
         self.close()

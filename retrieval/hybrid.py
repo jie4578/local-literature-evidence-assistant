@@ -71,6 +71,16 @@ class HybridRetriever:
                 warnings=[f"语义检索不可用，已回退 lexical：{type(exc).__name__}"],
             )
 
+        semantic_status = getattr(self.semantic_retriever, "last_status", "available")
+        semantic_warnings = list(getattr(self.semantic_retriever, "last_warnings", []) or [])
+        if semantic_status in {"unavailable", "not_indexed", "error"}:
+            return HybridSearchResponse(
+                results=lexical[:limit],
+                mode="lexical",
+                semantic_status=semantic_status,
+                warnings=semantic_warnings or ["语义检索未能提供可用结果，已回退 lexical。"],
+            )
+
         allowed = self.allowed_passage_ids
         if allowed is None:
             # 未提供当前批次 passage store 时，安全地只接受 lexical 已知 passage。
@@ -82,4 +92,9 @@ class HybridRetriever:
             rrf_k=self.rrf_k,
             allowed_passage_ids=allowed,
         )
-        return HybridSearchResponse(results=fused, mode="hybrid", semantic_status="available")
+        return HybridSearchResponse(
+            results=fused,
+            mode="hybrid",
+            semantic_status="available",
+            warnings=semantic_warnings,
+        )
