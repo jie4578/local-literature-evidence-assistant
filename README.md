@@ -192,16 +192,23 @@ docs/images/          README 截图位置
 - 原子写入 manifest、状态和逐篇缓存；
 - 自动化测试和真实 PDF 离线验收。
 
-## 截图
+## Demo 截图
 
-发布展示时，可将脱敏后的真实运行截图放入 `docs/images/`：
+以下截图来自真实运行的 `Local Offline` 模式，输入为明确标注的
+`Synthetic Demo PDF`。截图不包含真实论文、用户数据或 API 请求，
+仅用于展示本地解析、证据搜索和导出界面：
 
-- `main-ui.png`：主界面截图；
-- `offline-result.png`：离线处理结果截图；
-- `evidence-search.png`：证据搜索截图；
-- `export-preview.png`：Excel/Word 导出截图。
+![主界面](docs/images/main-ui.png)
 
-本版本不包含真实论文截图，也没有新增截图。请勿提交含有本地绝对路径、用户名、敏感文件名或 API Key 的截图。
+![离线处理结果](docs/images/offline-result.png)
+
+![证据搜索](docs/images/evidence-search.png)
+
+![导出结果](docs/images/export-preview.png)
+
+重要边界：Local Offline 不上传论文；截图中的 Synthetic Demo 内容仅用于
+产品演示，不代表真实科研结果。请勿提交含有本地绝对路径、用户名、敏感
+文件名或 API Key 的截图。
 
 ## 后续路线
 
