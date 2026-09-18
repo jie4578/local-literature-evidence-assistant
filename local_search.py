@@ -6,8 +6,57 @@ import hashlib
 import re
 import sqlite3
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+
+@dataclass(frozen=True)
+class SearchContext:
+    """当前批次的本地搜索边界，不包含论文全文或任何凭据。"""
+
+    batch_id: str
+    task_dir: str
+    db_path: str
+    document_sources: tuple[str, ...] = ()
+    document_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "task_dir": self.task_dir,
+            "db_path": self.db_path,
+            "document_sources": list(self.document_sources),
+            "document_count": self.document_count,
+        }
+
+    @classmethod
+    def from_value(cls, value: Any) -> "SearchContext | None":
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            return None
+        batch_id = value.get("batch_id")
+        task_dir = value.get("task_dir")
+        db_path = value.get("db_path")
+        sources = value.get("document_sources", ())
+        if not all(isinstance(item, str) and item.strip() for item in (batch_id, task_dir, db_path)):
+            return None
+        if not isinstance(sources, (list, tuple)):
+            return None
+        normalized_sources = tuple(
+            dict.fromkeys(item.strip() for item in sources if isinstance(item, str) and item.strip())
+        )
+        count = value.get("document_count", len(normalized_sources))
+        if not isinstance(count, int) or count < 0:
+            count = len(normalized_sources)
+        return cls(
+            batch_id=batch_id.strip(),
+            task_dir=task_dir.strip(),
+            db_path=db_path.strip(),
+            document_sources=normalized_sources,
+            document_count=count,
+        )
 
 
 class LocalSearchIndex:
@@ -22,6 +71,19 @@ class LocalSearchIndex:
             self.fts5_available = False
             self.conn.execute("CREATE TABLE IF NOT EXISTS pages_fallback (source_file TEXT, page_number INTEGER, text TEXT, content_hash TEXT, UNIQUE(source_file, page_number))")
         self.conn.commit()
+
+    def close(self) -> None:
+        """关闭 SQLite 连接；可重复调用。"""
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            conn.close()
+            self.conn = None
+
+    def __enter__(self) -> "LocalSearchIndex":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
     def index_pages(self, pages: Iterable[Any]) -> int:
         page_list = list(pages)
@@ -61,12 +123,34 @@ class LocalSearchIndex:
         self._ensure_indexed_files()
         self.conn.execute("DELETE FROM indexed_files WHERE source_file = ?", (source_file,))
 
-    def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+    @staticmethod
+    def _source_filter(source_files: Iterable[str] | None) -> tuple[str, list[str]]:
+        if source_files is None:
+            return "", []
+        sources = tuple(
+            dict.fromkeys(
+                str(source).strip()
+                for source in source_files
+                if str(source).strip()
+            )
+        )
+        if not sources:
+            return " AND 1 = 0", []
+        # 仅插入由程序生成的占位符，来源值始终作为 SQL 参数传入。
+        placeholders = ", ".join("?" for _ in sources)
+        return f" AND source_file IN ({placeholders})", list(sources)
+
+    def search(
+        self,
+        query: str,
+        limit: int = 20,
+        source_files: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
         if not query.strip():
             return []
         special_pattern = self._statistical_pattern(query)
         if special_pattern is not None:
-            return self._search_pattern(special_pattern, limit)
+            return self._search_pattern(special_pattern, limit, source_files=source_files)
         if self.fts5_available:
             if query.startswith('"') and query.endswith('"'):
                 match = query
@@ -75,8 +159,13 @@ class LocalSearchIndex:
                 match = " AND ".join(tokens)
             if not match:
                 return []
+            source_clause, source_params = self._source_filter(source_files)
             try:
-                rows = self.conn.execute("SELECT source_file,page_number,text FROM pages_fts WHERE pages_fts MATCH ? LIMIT ?", (match, limit)).fetchall()
+                rows = self.conn.execute(
+                    "SELECT source_file,page_number,text FROM pages_fts "
+                    f"WHERE pages_fts MATCH ?{source_clause} LIMIT ?",
+                    (match, *source_params, limit),
+                ).fetchall()
             except sqlite3.OperationalError:
                 return []
         else:
@@ -84,8 +173,13 @@ class LocalSearchIndex:
             if not terms:
                 return []
             condition = " AND ".join("text LIKE ?" for _ in terms)
+            source_clause, source_params = self._source_filter(source_files)
             try:
-                rows = self.conn.execute(f"SELECT source_file,page_number,text FROM pages_fallback WHERE {condition} LIMIT ?", tuple(f"%{term}%" for term in terms) + (limit,)).fetchall()
+                rows = self.conn.execute(
+                    f"SELECT source_file,page_number,text FROM pages_fallback "
+                    f"WHERE {condition}{source_clause} LIMIT ?",
+                    tuple(f"%{term}%" for term in terms) + tuple(source_params) + (limit,),
+                ).fetchall()
             except sqlite3.OperationalError:
                 return []
         return [{"source_file": row[0], "page_number": row[1], "snippet": row[2]} for row in rows]
@@ -101,10 +195,20 @@ class LocalSearchIndex:
             return re.compile(rf"(?i)\bp\s*{operator}\s*{number}")
         return None
 
-    def _search_pattern(self, pattern: re.Pattern[str], limit: int) -> list[dict[str, Any]]:
+    def _search_pattern(
+        self,
+        pattern: re.Pattern[str],
+        limit: int,
+        source_files: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
         table = "pages_fts" if self.fts5_available else "pages_fallback"
+        source_clause, source_params = self._source_filter(source_files)
         try:
-            rows = self.conn.execute(f"SELECT source_file,page_number,text FROM {table}").fetchall()
+            rows = self.conn.execute(
+                f"SELECT source_file,page_number,text FROM {table} "
+                f"WHERE 1 = 1{source_clause}",
+                tuple(source_params),
+            ).fetchall()
         except sqlite3.OperationalError:
             return []
         return [{"source_file": row[0], "page_number": row[1], "snippet": row[2]} for row in rows if pattern.search(row[2])][:limit]
@@ -116,4 +220,4 @@ class LocalSearchIndex:
         self.conn.execute("DROP TABLE IF EXISTS pages_fallback")
         self.conn.execute("DROP TABLE IF EXISTS pages_fts")
         self.conn.commit()
-        self.conn.close()
+        self.close()

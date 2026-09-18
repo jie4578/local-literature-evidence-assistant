@@ -13,6 +13,7 @@ import fitz
 import json
 import re
 import os
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +29,7 @@ from exporters import export_csv, export_excel, export_individual_reports, expor
 from bilingual import translate_paper_for_display, translated_paper_text
 from local_extractor import extract_local_paper
 from local_summary import LANGUAGE_OPTIONS, compare_papers, extractive_summary, offline_language_notice
-from local_search import LocalSearchIndex
+from local_search import LocalSearchIndex, SearchContext
 from batch_manager import run_local_batch, update_batch_manifest
 from report_modes import NO_WORD_MODE, REPORT_MODE_OPTIONS, report_layout_plan, select_word_papers
 
@@ -232,10 +233,12 @@ def process_local_papers(
     report_mode="自动选择",
     resume_dir=None,
     pause_after=None,
+    return_search_context=False,
 ):
     """本地离线解析：不创建 DeepSeek 客户端、不访问网络。"""
     if not pdf_files:
-        return "❌ 请上传至少一个 PDF 文件", None
+        result = ("❌ 请上传至少一个 PDF 文件", None)
+        return (*result, None) if return_search_context else result
     paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
     def report_progress(value, description):
         try:
@@ -254,12 +257,22 @@ def process_local_papers(
             extractor=extract_local_paper,
         )
     except (OSError, ValueError) as exc:
-        return f"❌ 本地批次处理失败：{exc}", None
+        result = (f"❌ 本地批次处理失败：{exc}", None)
+        return (*result, None) if return_search_context else result
     task_dir = batch.task_dir
     papers = batch.papers
-    local_index = LocalSearchIndex(os.path.join("output", "local_index.sqlite"))
-    for paper in papers:
-        local_index.index_pages(paper.get("pages", []))
+    local_db_path = task_dir / "local_index.sqlite"
+    indexed_sources = []
+    with LocalSearchIndex(local_db_path) as local_index:
+        for paper in papers:
+            pages = paper.get("pages", []) or []
+            if not pages or paper.get("errors"):
+                continue
+            local_index.index_pages(pages)
+            first_page = pages[0]
+            source_file = first_page.source_file if hasattr(first_page, "source_file") else first_page.get("source_file")
+            if source_file:
+                indexed_sources.append(str(source_file))
     for paper in papers:
         summary = extractive_summary(paper)
         paper["extractive_summary"] = summary
@@ -340,14 +353,49 @@ def process_local_papers(
                 status = "已验证" if item.get("verified") else "未验证，请回查原文"
                 pages = "、".join(str(page) for page in item.get("pdf_pages", [])) or "未知"
                 lines.append(f"- [{item.get('section', '未标明章节')} · PDF 第 {pages} 页 · {status}] {item.get('text', '')}")
-    return "\n".join(lines), str(output_path) if output_path else None
+    result = ("\n".join(lines), str(output_path) if output_path else None)
+    if not return_search_context:
+        return result
+    context = SearchContext(
+        batch_id=task_dir.name,
+        task_dir=str(task_dir),
+        db_path=str(local_db_path),
+        document_sources=tuple(dict.fromkeys(indexed_sources)),
+        document_count=len(dict.fromkeys(indexed_sources)),
+    ).to_dict()
+    return (*result, context)
 
 
-def search_local_index(query, limit=20):
-    """查询本地 SQLite 索引；不访问网络。"""
+def search_local_index(query, search_context=None, limit=20):
+    """只查询当前批次 SQLite 索引；不访问网络或历史全局索引。"""
     if not query or not query.strip():
         return "请输入关键词或精确短语。"
-    rows = LocalSearchIndex(os.path.join("output", "local_index.sqlite")).search(query, limit=limit)
+    context = SearchContext.from_value(search_context)
+    if context is None:
+        return "请先完成一次 Local Offline 文献处理。"
+    task_dir = Path(context.task_dir)
+    db_path = Path(context.db_path)
+    try:
+        task_dir_resolved = task_dir.resolve()
+        db_path_resolved = db_path.resolve()
+    except OSError:
+        return "❌ 当前批次索引不存在或任务目录已被删除，无法搜索。"
+    if (
+        not task_dir_resolved.is_dir()
+        or db_path_resolved.name != "local_index.sqlite"
+        or db_path_resolved.parent != task_dir_resolved
+        or not db_path_resolved.is_file()
+    ):
+        return "❌ 当前批次索引不存在或任务目录已被删除，无法搜索。"
+    try:
+        with LocalSearchIndex(db_path_resolved) as local_index:
+            rows = local_index.search(
+                query,
+                limit=limit,
+                source_files=context.document_sources,
+            )
+    except (OSError, ValueError, sqlite3.Error):
+        return "❌ 当前批次索引无法读取，请重新完成 Local Offline 文献处理。"
     if not rows:
         return "未找到匹配内容。"
     return "\n\n".join(f"{row['source_file']} · PDF 第 {row['page_number']} 页\n{row['snippet']}" for row in rows)
@@ -515,6 +563,44 @@ def process_papers(
     return result_text, output_path
 
 
+def process_papers_for_ui(
+    pdf_files,
+    api_key,
+    mode=None,
+    progress=gr.Progress(),
+    provider_name="DeepSeek",
+    model="",
+    base_url="",
+    result_language="中文摘要＋英文证据（推荐）",
+    report_mode="自动选择",
+    selected_ai_files=None,
+    ai_confirmed=False,
+):
+    """UI 适配层：额外返回当前批次搜索上下文，不改变旧处理函数返回值。"""
+    if mode == "Local Offline":
+        return process_local_papers(
+            pdf_files,
+            progress=progress,
+            result_language=result_language,
+            report_mode=report_mode,
+            return_search_context=True,
+        )
+    result = process_papers(
+        pdf_files,
+        api_key,
+        mode=mode,
+        progress=progress,
+        provider_name=provider_name,
+        model=model,
+        base_url=base_url,
+        result_language=result_language,
+        report_mode=report_mode,
+        selected_ai_files=selected_ai_files,
+        ai_confirmed=ai_confirmed,
+    )
+    return result[0], result[1], None
+
+
 def test_provider_connection(provider_name, model, base_url, api_key):
     """只发送最小健康检查，不发送论文文本。"""
     if provider_name == "Local Offline":
@@ -580,6 +666,9 @@ def build_ui():
         footer { display: none !important; }
         """
     ) as demo:
+
+        # 每个浏览器会话独立保存当前批次边界；不使用模块级全局索引。
+        search_context_state = gr.State(None)
 
         # 顶部标题
         gr.HTML("""
@@ -678,6 +767,7 @@ def build_ui():
                     with gr.Tab("证据与页码"):
                         gr.Markdown("已验证：证据文本与 PDF 原文匹配；未验证：请根据 PDF 物理页码回查原文。source_type 仅表示程序对来源形态的保守判断。")
                     with gr.Tab("本地搜索"):
+                        gr.Markdown("搜索范围：当前批次（仅搜索最近一次 Local Offline 处理结果，不检索历史任务）。")
                         local_query = gr.Textbox(label="本地证据搜索", placeholder="关键词或精确短语（仅搜索本地索引）")
                         local_search_btn = gr.Button("🔎 搜索本地证据")
                         local_search_output = gr.Textbox(label="本地搜索结果", lines=8)
@@ -687,9 +777,9 @@ def build_ui():
 
         # 绑定事件
         submit_btn.click(
-            fn=process_papers,
+            fn=process_papers_for_ui,
             inputs=[pdf_input, api_key_input, mode_input, provider_input, model_input, base_url_input, result_language_input, report_mode_input, ai_selection_input, ai_confirm_input],
-            outputs=[result_text, docx_output],
+            outputs=[result_text, docx_output, search_context_state],
         )
 
         pdf_input.change(
@@ -736,7 +826,11 @@ def build_ui():
             inputs=[provider_input, model_input, base_url_input, api_key_input],
             outputs=[connection_output],
         )
-        local_search_btn.click(search_local_index, inputs=[local_query], outputs=[local_search_output])
+        local_search_btn.click(
+            search_local_index,
+            inputs=[local_query, search_context_state],
+            outputs=[local_search_output],
+        )
 
     return demo
 
