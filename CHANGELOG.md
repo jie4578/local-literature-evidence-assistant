@@ -2,7 +2,7 @@
 
 ## [0.3.0-bilingual-corpus-preview]
 
-预览版本，预留 Tag 名称 `v0.3.0-bilingual-corpus-preview`。不是稳定版，也不是科研生产级版本。
+预览版本，已发布为 GitHub Pre-release `v0.3.0-bilingual-corpus-preview`。不是稳定版，也不是科研生产级版本。
 
 ### Added
 
