@@ -34,7 +34,9 @@ def _clean_page_text(raw: str, repeated_lines: set[str]) -> tuple[str, list[str]
         flags.append("soft_hyphen")
     if "�" in raw:
         flags.append("replacement_character")
-    text = unicodedata.normalize("NFKC", raw.replace("\u00ad", ""))
+    # NFC 保留语义上有区别的展示字符（如 µ/μ、R²、±）；兼容等价匹配
+    # 仅在证据定位层处理，不能在 display 层静默替换。
+    text = unicodedata.normalize("NFC", raw.replace("\u00ad", ""))
     safe_chars = []
     for char in text:
         if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}:
@@ -146,6 +148,12 @@ def _assign_fact_sections(facts: list[dict[str, Any]], sections: dict[str, dict[
         for kind, section in sections.items():
             section_text = normalize(section.get("text", ""))
             if quote and quote in section_text:
+                matches.append((section.get("page_start", 0), kind))
+                continue
+            # 页面文本有时把章节标题和第一句正文拼成同一行；事实本身
+            # 仍来自原文，但匹配时允许剥离已识别的章节标题前缀。
+            title = normalize(section.get("title", ""))
+            if title and quote.startswith(f"{title} ") and quote[len(title):].strip() in section_text:
                 matches.append((section.get("page_start", 0), kind))
         if matches:
             fact["section"] = sorted(matches, key=lambda item: item[0], reverse=True)[0][1]

@@ -15,19 +15,22 @@ import re
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 import gradio as gr
-from paper_pipeline import PipelineConfig, run_batch
+from paper_pipeline import PipelineConfig, request_budget_summary, run_batch
 from providers import DEFAULT_OUTPUT_TOKEN_BUDGETS, ProviderError, create_provider, provider_defaults, provider_names, sanitize_error
-from exporters import export_csv, export_excel, export_json, export_word
+from exporters import export_csv, export_excel, export_individual_reports, export_json, export_word
 from bilingual import translate_paper_for_display, translated_paper_text
 from local_extractor import extract_local_paper
 from local_summary import LANGUAGE_OPTIONS, compare_papers, extractive_summary, offline_language_notice
 from local_search import LocalSearchIndex
+from batch_manager import run_local_batch, update_batch_manifest
+from report_modes import NO_WORD_MODE, REPORT_MODE_OPTIONS, report_layout_plan, select_word_papers
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
@@ -222,31 +225,102 @@ def save_docx(title, content, output_path):
 #  Gradio 处理函数
 # ============================================================
 
-def process_local_papers(pdf_files, progress=gr.Progress(), result_language="中文摘要＋英文证据（推荐）"):
+def process_local_papers(
+    pdf_files,
+    progress=gr.Progress(),
+    result_language="中文摘要＋英文证据（推荐）",
+    report_mode="自动选择",
+    resume_dir=None,
+    pause_after=None,
+):
     """本地离线解析：不创建 DeepSeek 客户端、不访问网络。"""
     if not pdf_files:
         return "❌ 请上传至少一个 PDF 文件", None
     paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
-    task_dir = os.path.join("output", f"local_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}")
-    os.makedirs(task_dir, exist_ok=False)
-    papers = []
+    def report_progress(value, description):
+        try:
+            progress(value, desc=description)
+        except TypeError:
+            progress(value, description)
+
+    try:
+        batch = run_local_batch(
+            paths,
+            output_root="output",
+            report_mode=report_mode,
+            resume_dir=resume_dir,
+            pause_after=pause_after,
+            progress=report_progress,
+            extractor=extract_local_paper,
+        )
+    except (OSError, ValueError) as exc:
+        return f"❌ 本地批次处理失败：{exc}", None
+    task_dir = batch.task_dir
+    papers = batch.papers
     local_index = LocalSearchIndex(os.path.join("output", "local_index.sqlite"))
-    for index, path in enumerate(paths, 1):
-        progress(index / max(1, len(paths)), desc=f"本地解析 {index}/{len(paths)}")
-        papers.append(extract_local_paper(path))
-        local_index.index_pages(papers[-1].get("pages", []))
-    summaries = []
+    for paper in papers:
+        local_index.index_pages(paper.get("pages", []))
     for paper in papers:
         summary = extractive_summary(paper)
         paper["extractive_summary"] = summary
-        summaries.append(summary)
+    selection_records = select_word_papers(papers, max_papers=10)
+    selection_updates = {}
+    for paper, selection in zip(papers, selection_records):
+        paper.update(selection)
+        if paper.get("document_id"):
+            selection_updates[paper["document_id"]] = {
+                key: selection[key]
+                for key in ("selection_strategy", "included_in_word", "selection_rank", "selection_score", "selection_reason")
+            }
+    batch.manifest = update_batch_manifest(task_dir, document_updates=selection_updates)
     comparison = compare_papers(papers)
-    export_json(papers, os.path.join(task_dir, "local_papers.json"))
-    export_json(comparison, os.path.join(task_dir, "comparison.json"))
-    export_csv(comparison, os.path.join(task_dir, "comparison.csv"))
-    export_excel(comparison, os.path.join(task_dir, "comparison.xlsx"))
-    output_path = export_word(comparison, os.path.join(task_dir, "literature_analysis.docx"), papers=papers, report_mode="Local Offline")
-    lines = ["模式：Local Offline", f"结果语言：{result_language}", offline_language_notice(result_language), f"本地结果目录：{task_dir}"]
+    layout_plan = report_layout_plan(report_mode, len(papers))
+    export_json(papers, task_dir / "local_papers.json")
+    comparison_payload = {
+        "documents": comparison,
+        "inputs": batch.manifest.get("inputs", []),
+        "selection_strategy": "metadata_completeness_verified_evidence_section_coverage_quality_document_id",
+    }
+    export_json(comparison_payload, task_dir / "comparison.json")
+    if report_mode != NO_WORD_MODE:
+        export_csv(comparison, task_dir / "comparison.csv")
+    output_path = None
+    if layout_plan["word_enabled"]:
+        output_path = export_word(
+            comparison,
+            task_dir / "literature_analysis.docx",
+            papers=papers,
+            report_mode="Local Offline",
+            report_layout_mode=report_mode,
+            full_data_filename="comparison.xlsx / local_papers.json",
+        )
+    if layout_plan["individual_reports"]:
+        individual_paths = export_individual_reports(comparison, papers, task_dir / "individual_reports")
+        report_paths = {
+            paper.get("document_id"): paper["individual_report"]
+            for paper in papers
+            if paper.get("document_id") and paper.get("individual_report")
+        }
+        batch.manifest = update_batch_manifest(task_dir, report_paths=report_paths)
+    export_excel(
+        comparison,
+        task_dir / "comparison.xlsx",
+        inputs=batch.manifest.get("inputs", []),
+        documents=batch.manifest.get("documents", []),
+    )
+    lines = [
+        "模式：Local Offline",
+        f"结果语言：{result_language}",
+        f"报告模式：{layout_plan['resolved_mode']}（布局：{layout_plan['layout']}）",
+        offline_language_notice(result_language),
+        f"本地结果目录：{task_dir}",
+    ]
+    if not layout_plan["word_enabled"]:
+        lines.append("已按选择跳过 Word，仅导出 Excel/JSON。")
+    if layout_plan["full_data_required"]:
+        lines.append("完整批量数据：comparison.xlsx / local_papers.json；详细单篇报告：individual_reports/")
+    if batch.manifest.get("status") == "paused":
+        lines.append("⏸️ 批次已暂停；可使用同一结果目录和原始文件调用 resume_local_batch 继续。")
     lines.append("提示：本地规则提取暂不能稳定区分正文、表格标题和表格内容，重要结果请根据 PDF 页码回查原文。摘取式摘要仅选取原句，不代表 AI 生成或事实核验。")
     for paper in papers:
         lines.append(f"\n📄 {paper['file_name']}：{len(paper.get('pages', []))} 页，{len(paper.get('facts', []))} 条规则证据")
@@ -266,7 +340,7 @@ def process_local_papers(pdf_files, progress=gr.Progress(), result_language="中
                 status = "已验证" if item.get("verified") else "未验证，请回查原文"
                 pages = "、".join(str(page) for page in item.get("pdf_pages", [])) or "未知"
                 lines.append(f"- [{item.get('section', '未标明章节')} · PDF 第 {pages} 页 · {status}] {item.get('text', '')}")
-    return "\n".join(lines), str(output_path)
+    return "\n".join(lines), str(output_path) if output_path else None
 
 
 def search_local_index(query, limit=20):
@@ -279,11 +353,73 @@ def search_local_index(query, limit=20):
     return "\n\n".join(f"{row['source_file']} · PDF 第 {row['page_number']} 页\n{row['snippet']}" for row in rows)
 
 
-def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provider_name="DeepSeek", model="", base_url="", result_language="中文摘要＋英文证据（推荐）"):
+def _selected_pdf_paths(pdf_files, selected_files):
+    """按界面勾选结果筛选文件名；不会读取文件内容。"""
+    if not pdf_files or not selected_files:
+        return []
+    selected = {Path(str(value)).name for value in selected_files}
+    paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
+    return [path for path in paths if Path(str(path)).name in selected]
+
+
+def estimate_ai_plan(pdf_files, selected_files, provider_name="DeepSeek", model=""):
+    """本地估算 AI 请求规模；不创建 Provider、不发送网络请求。"""
+    paths = _selected_pdf_paths(pdf_files, selected_files)
+    if not paths:
+        return "请选择需要 AI 分析的具体论文；当前仅显示估算，不会创建 Provider。"
+    config = PipelineConfig(max_retries=0, repair_attempts=0)
+    chunk_count = 0
+    output_tokens = 0
+    details = []
+    base_requests = 0
+    try:
+        for path in paths:
+            paper = extract_local_paper(path, config=config)
+            count = len(paper.get("chunks", []))
+            chunk_count += count
+            summary = request_budget_summary(count, config, include_batch_review=False)
+            base_requests += summary["base_request_count"]
+            output_tokens += summary["theoretical_max_output_tokens"]
+            details.append(f"{Path(path).name}：{count} 个 chunk，{summary['base_request_count']} 次（分块+单篇归并）")
+    except (OSError, ValueError) as exc:
+        return f"❌ 无法完成本地请求估算：{exc}"
+    final_requests = 1 if paths else 0
+    total_requests = base_requests + final_requests
+    output_tokens += config.final_max_output_tokens
+    lines = [
+        f"AI 预览（{provider_name} / {model or '未填写模型'}）：仅本地估算，尚未创建 Provider。",
+        f"已选择 {len(paths)} 篇，预计 {chunk_count} 个 chunk；基础请求约 {total_requests} 次（含最终汇总）。",
+        f"输出预算上限：约 {output_tokens} tokens；max_retries=0，repair_attempts=0；hard_request_limit 不会自动扩大。",
+        *details,
+    ]
+    return "\n".join(lines)
+
+
+def _ai_selection_choices(pdf_files):
+    if not pdf_files:
+        return gr.update(choices=[], value=[])
+    paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
+    choices = list(dict.fromkeys(Path(str(path)).name for path in paths))
+    return gr.update(choices=choices, value=[])
+
+
+def process_papers(
+    pdf_files,
+    api_key,
+    mode=None,
+    progress=gr.Progress(),
+    provider_name="DeepSeek",
+    model="",
+    base_url="",
+    result_language="中文摘要＋英文证据（推荐）",
+    report_mode="自动选择",
+    selected_ai_files=None,
+    ai_confirmed=False,
+):
     """主处理函数：接收上传的PDF，返回综述文本和Word文件"""
 
     if mode == "Local Offline":
-        return process_local_papers(pdf_files, progress, result_language)
+        return process_local_papers(pdf_files, progress, result_language, report_mode=report_mode)
 
     try:
         defaults = provider_defaults(provider_name)
@@ -294,8 +430,22 @@ def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provid
         env_name = defaults.get("env_key")
         suffix = f"，或在环境变量中设置 {env_name}" if env_name else ""
         return f"❌ 请先填写 {provider_name} API Key{suffix}", None
+
     if not pdf_files:
         return "❌ 请上传至少一个 PDF 文件", None
+    if not selected_ai_files:
+        return "❌ AI 模式需先勾选具体论文；批量上传不会自动调用 AI。", None
+    selected_paths = _selected_pdf_paths(pdf_files, selected_ai_files)
+    if not selected_paths:
+        return "❌ 未找到勾选的论文，请重新选择后再试。", None
+    if not ai_confirmed:
+        return "❌ 请先确认：选中的论文文本将发送至所选 AI Provider，可能产生请求或费用。", None
+
+    # AI 前先完成同一批选中文件的本地提取；这一步不创建 Provider，也不联网。
+    try:
+        run_local_batch(selected_paths, output_root="output", report_mode="自动选择", progress=None)
+    except (OSError, ValueError) as exc:
+        return f"❌ AI 前置本地解析失败：{exc}", None
 
     try:
         client = get_client(api_key, provider_name=provider_name, model=model, base_url=base_url)
@@ -307,7 +457,7 @@ def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provid
         return f"❌ {sanitize_error(exc, api_key)}", None
 
     log_lines = []
-    paths = [pdf_file.name if hasattr(pdf_file, "name") else pdf_file for pdf_file in pdf_files]
+    paths = selected_paths
     progress(0.05, desc="正在进行分页提取与分段分析...")
     pipeline_config = PipelineConfig(failure_policy="fail_fast")
     pipeline_result = run_batch(
@@ -344,11 +494,16 @@ def process_papers(pdf_files, api_key, mode=None, progress=gr.Progress(), provid
     # 保存 Word
     progress(0.95, desc="正在生成 Word 文档...")
     try:
+        if report_mode == NO_WORD_MODE:
+            log_lines.append("⏭️ 已按报告模式跳过 Word，仅保留 JSON/Excel 等结构化结果。")
+            progress(1.0, desc="完成！")
+            return "\n".join(log_lines) + "\n\n" + review, None
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(str(pipeline_result.task_dir), f"literature_analysis_{timestamp}.docx")
         report_rows = compare_papers(pipeline_result.papers)
         export_word(report_rows, output_path, papers=pipeline_result.papers,
-                    report_mode=f"AI Provider / {provider_name}", final_review=pipeline_result.final_review)
+                    report_mode=f"AI Provider / {provider_name}", final_review=pipeline_result.final_review,
+                    report_layout_mode=report_mode, full_data_filename="papers.json / review.json")
         log_lines.append(f"✅ Word 文档已生成")
     except Exception as e:
         return f"❌ Word 生成失败: {e}", None
@@ -449,6 +604,11 @@ def build_ui():
                     label="结果语言", info="Local Offline 不进行语义翻译，始终保留英文证据原文"
                 )
 
+                report_mode_input = gr.Dropdown(
+                    list(REPORT_MODE_OPTIONS), value="自动选择", label="报告模式",
+                    info="1篇不生成对比；4篇以上使用纵向文献库汇总；可选择不生成 Word",
+                )
+
                 provider_input = gr.Dropdown(
                     provider_names(), value="DeepSeek", label="AI Provider", visible=False
                 )
@@ -474,7 +634,19 @@ def build_ui():
                     file_types=[".pdf"],
                 )
 
-                gr.HTML('<div class="tip-box">📌 支持同时上传多篇论文，自动批量分析后生成综合综述</div>')
+                ai_selection_input = gr.CheckboxGroup(
+                    choices=[], label="AI 分析论文（仅主动勾选的文件）", visible=False,
+                    info="AI 模式会先完成本地提取；未勾选的论文不会发送给 Provider",
+                )
+                ai_confirm_input = gr.Checkbox(
+                    label="我确认选中文本将发送至 AI Provider，可能产生请求或费用",
+                    visible=False,
+                )
+                ai_plan_output = gr.Markdown(
+                    "选择论文后显示本地请求估算。", visible=False,
+                )
+
+                gr.HTML('<div class="tip-box">📌 支持同时上传多篇论文；默认先离线解析，再按报告模式导出</div>')
 
                 submit_btn = gr.Button(
                     "🚀 开始处理",
@@ -516,9 +688,22 @@ def build_ui():
         # 绑定事件
         submit_btn.click(
             fn=process_papers,
-            inputs=[pdf_input, api_key_input, mode_input, provider_input, model_input, base_url_input, result_language_input],
+            inputs=[pdf_input, api_key_input, mode_input, provider_input, model_input, base_url_input, result_language_input, report_mode_input, ai_selection_input, ai_confirm_input],
             outputs=[result_text, docx_output],
         )
+
+        pdf_input.change(
+            _ai_selection_choices,
+            inputs=[pdf_input],
+            outputs=[ai_selection_input],
+        )
+
+        ai_selection_input.change(
+            estimate_ai_plan,
+            inputs=[pdf_input, ai_selection_input, provider_input, model_input],
+            outputs=[ai_plan_output],
+        )
+
         def update_ai_visibility(mode):
             visible = mode == "AI Provider"
             return [
@@ -528,6 +713,9 @@ def build_ui():
                 gr.update(visible=visible, value=""),
                 gr.update(visible=visible),
                 gr.update(visible=visible),
+                gr.update(visible=visible, value=[]),
+                gr.update(visible=visible, value=False),
+                gr.update(visible=visible, value="选择论文后显示本地请求估算。"),
             ]
 
         def update_provider_fields(name):
@@ -537,7 +725,7 @@ def build_ui():
         mode_input.change(
             update_ai_visibility,
             inputs=[mode_input],
-            outputs=[provider_input, model_input, base_url_input, api_key_input, connection_btn, connection_output],
+            outputs=[provider_input, model_input, base_url_input, api_key_input, connection_btn, connection_output, ai_selection_input, ai_confirm_input, ai_plan_output],
         )
         provider_input.change(
             update_provider_fields,

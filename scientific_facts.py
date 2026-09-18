@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Iterable
 
 
 RULES = {
-    "sample_size": r"\b(?:n\s*=\s*\d[\d,]*|\d[\d,]*\s+(?:independent\s+)?samples?|sample size\s*(?:was|of|=)\s*\d[\d,]*)\b",
+    "sample_size": r"\b(?:n\s*=\s*\d[\d,]*|\d[\d,]*\s+(?:independent\s+)?(?:samples?|participants?|subjects?|patients?)|sample size\s*(?:was|of|=)\s*\d[\d,]*)\b",
     "group_count": r"\b(?:two|three|\d+)\s+(?:groups?|arms?)\b|(?:assigned|randomized|allocated)\s+to\s+the\s+[^.]{0,100}\s+and\s+[^.]{0,100}\s+groups?",
     "temperature": r"\b(?:at|to|stored at)\s*-?\d+(?:\.\d+)?\s*(?:degrees?\s*)?(?:C|F|Celsius|Fahrenheit)\b|\b\d+(?:\.\d+)?\s*°\s*[CF]\b",
     "time": r"\b(?:for|over|lasted?)\s+(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:days?|weeks?|months?|hours?|years?)\b",
-    "concentration": r"\b\d+(?:\.\d+)?\s*(?:mg/mL|mg/L|µg/mL|ug/mL|mM|µM|uM|%)\b",
+    "concentration": r"\b\d+(?:\.\d+)?\s*(?:mg/mL|mg/L|[µμ]g/mL|ug/mL|mM|[µμ]M|uM|%)\b",
     "dose": r"\b(?:dose|dosed|dosage)\w*\s*(?:of|was|=)?\s*\d+(?:\.\d+)?\s*(?:mg/kg|mg|g|µg|ug)\b",
     "p_value": r"\bp\s*[<=>]\s*0?\.\d+\b",
     "confidence_interval": r"\b(?:95%\s*)?(?:CI|confidence interval)\s*[:=]?\s*\(?\s*[-\d.]+\s*(?:to|–|-|,)\s*[-\d.]+\s*\)?",
@@ -24,6 +25,25 @@ RULES = {
     "limitation": r"\b(?:limitation|limited by|preliminary|replication|larger sample|single laboratory|single[- ]center|small sample|short duration)\b",
     "conclusion": r"\b(?:we conclude|in conclusion|concluded that|showed greater|demonstrated)\b",
 }
+
+
+METHOD_SEMANTIC_RE = re.compile(
+    r"\b(?:used|measured|analy[sz]ed|fitt?(?:ed|ing)?|estimated|calculated|modeled|modelled)\b",
+    re.IGNORECASE,
+)
+RESULT_SIGNAL_RE = re.compile(
+    r"\b(?:observed|increased|decreased|higher|lower|retained|improved|reduced|greater|unchanged|remained|unaffected|stable)\b|"
+    r"\bp\s*[<=>]|\bR\s*(?:square|squared|2|²)\b",
+    re.IGNORECASE,
+)
+
+
+def is_method_evidence_sentence(sentence: str) -> bool:
+    """限制研究方法分类：R²/model fit 本身不能把结果句变成方法。"""
+    if not re.search(RULES["research_method"], sentence, re.IGNORECASE):
+        return False
+    has_methods_heading = bool(re.match(r"^\s*(?:methods?|materials\s+and\s+methods?)\b", sentence, re.IGNORECASE))
+    return has_methods_heading or (bool(METHOD_SEMANTIC_RE.search(sentence)) and not RESULT_SIGNAL_RE.search(sentence))
 
 
 VISUAL_WORD_REPAIRS = (
@@ -66,7 +86,10 @@ def _raw_quote_for_display(display_sentence: str, raw_text: str) -> str | None:
             return match.group(0)
     for candidate in _sentences(raw_text):
         normalized_candidate = re.sub(r"\s+", " ", candidate).strip()
-        if normalized_target in normalized_candidate or normalized_candidate in normalized_target:
+        # NFKC 只用于定位 Unicode 等价字符（例如 µ/μ），返回值仍是 raw 原文。
+        target_nfkc = unicodedata.normalize("NFKC", normalized_target)
+        candidate_nfkc = unicodedata.normalize("NFKC", normalized_candidate)
+        if target_nfkc in candidate_nfkc or candidate_nfkc in target_nfkc:
             return candidate
     return display_sentence if display_sentence in raw_text else None
 
@@ -83,12 +106,14 @@ def extract_scientific_facts(pages: Iterable[Any]) -> list[dict[str, Any]]:
         for sentence in _sentences(display_text):
             display_sentence = repair_visual_word_breaks(sentence)
             normalized_sentence = re.sub(r"\s+", " ", display_sentence).strip()
-            is_model_fit = bool(re.search(RULES["research_method"], display_sentence, flags=re.IGNORECASE))
+            is_model_fit = is_method_evidence_sentence(display_sentence)
             # 出版标签、标题、作者和单位可能与下一段连成一个视觉句子；
             # 不把这类首屏前置信息当作科研事实。原始页面仍完整保留。
             if front_matter_prefix.match(normalized_sentence):
                 continue
             for category, pattern in RULES.items():
+                if category == "research_method" and not is_model_fit:
+                    continue
                 if category == "major_result" and is_model_fit:
                     continue
                 if re.search(pattern, display_sentence, flags=re.IGNORECASE):

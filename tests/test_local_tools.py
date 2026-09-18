@@ -12,7 +12,7 @@ from exporters import DISPLAY_LABELS, _conclusions, _limitations, _major_results
 from bilingual import translate_paper_for_display
 from local_extractor import _clean_page_text, extract_local_paper
 from local_search import LocalSearchIndex
-from local_summary import compare_papers, extractive_summary
+from local_summary import _sentence_key, compare_papers, extractive_summary
 from paper_pipeline import PageText
 from section_parser import parse_sections
 from scientific_facts import extract_scientific_facts, repair_visual_word_breaks
@@ -45,6 +45,33 @@ def test_local_extraction_sections_metadata_and_facts(tmp_path):
     assert {"sample_size", "temperature", "time", "p_value", "mean_sd", "randomization", "double_blind", "limitation", "conclusion"} <= categories
     assert all(fact["verified"] is True for fact in result["facts"])
     assert all(fact["pdf_page_start"] == fact["pdf_page_end"] for fact in result["facts"])
+
+
+def test_participants_expression_is_extracted_as_sample_size():
+    pages = [{
+        "source_file": "participants.pdf", "page_number": 2,
+        "raw_text": "Methods\nThe study included 41 participants.",
+        "text": "Methods\nThe study included 41 participants.",
+        "display_text": "Methods\nThe study included 41 participants.",
+    }]
+    facts = extract_scientific_facts(pages)
+    sample = [fact for fact in facts if fact["category"] == "sample_size"]
+    assert sample
+    assert "41 participants" in sample[0]["evidence_quote_display"]
+    assert sample[0]["evidence_quote_raw"] in pages[0]["raw_text"]
+    assert sample[0]["pdf_page_start"] == 2 and sample[0]["verified"] is True
+
+
+def test_sample_size_display_is_compact_but_raw_evidence_is_unchanged():
+    facts = [{
+        "category": "sample_size",
+        "evidence_quote_display": "The study included 41 participants.",
+        "evidence_quote_raw": "The study included 41 participants.",
+        "pdf_page_start": 2, "pdf_page_end": 2, "verified": True,
+    }]
+    row = compare_papers([{"file_name": "compact.pdf", "facts": facts}])[0]
+    assert row["sample_size"] == "41 participants"
+    assert facts[0]["evidence_quote_raw"] == "The study included 41 participants."
 
 
 def test_section_parser_requires_explicit_heading():
@@ -168,6 +195,20 @@ def test_display_removes_controls_but_raw_is_preserved_and_flagged(tmp_path):
     display, flags = _clean_page_text("value\x01 with µ °C ± α β ≤ ≥", set())
     assert "\x01" not in display
     assert "raw_control_character_removed_for_display" in flags
+
+
+def test_fact_with_section_heading_prefix_is_assigned_to_that_section():
+    pages = [{
+        "source_file": "heading.pdf", "page_number": 1,
+        "raw_text": "Results\nThe observed response increased: R² = 0.92, α and β were ≤ 1.0 and ≥ 0.1, with p = 0.001.",
+        "text": "Results\nThe observed response increased: R² = 0.92, α and β were ≤ 1.0 and ≥ 0.1, with p = 0.001.",
+        "display_text": "Results\nThe observed response increased: R² = 0.92, α and β were ≤ 1.0 and ≥ 0.1, with p = 0.001.",
+    }]
+    facts = extract_scientific_facts(pages)
+    sections = {"results": {"title": "Results", "text": "The observed response increased: R² = 0.92, α and β were ≤ 1.0 and ≥ 0.1, with p = 0.001.", "page_start": 1, "page_end": 1}}
+    from local_extractor import _assign_fact_sections
+    _assign_fact_sections(facts, sections)
+    assert facts and all(fact["section"] == "results" for fact in facts)
 
 
 def test_unicode_exports_round_trip(tmp_path):
@@ -416,6 +457,164 @@ def test_display_type_mapping_keeps_method_distinct_from_model_fit():
     assert DISPLAY_LABELS["model_fit"] == "模型拟合"
     assert DISPLAY_LABELS["r_square"] == "模型拟合"
     assert DISPLAY_LABELS["temperature"] == "温度条件"
+    assert DISPLAY_LABELS["concentration"] == "浓度条件"
+
+
+def test_word_methods_use_evidence_not_category_name_and_map_concentration(tmp_path):
+    paper = {
+        "file_name": "method.pdf", "title_candidate": "Method Study",
+        "facts": [
+            {"category": "research_method", "evidence_quote_raw": "The trial used randomization.",
+             "evidence_quote_display": "The trial used randomization.", "pdf_page_start": 2,
+             "pdf_page_end": 2, "verified": True, "source_type": "body", "quality_flags": []},
+            {"category": "concentration", "evidence_quote_raw": "The dose was 0.6 µg/mL.",
+             "evidence_quote_display": "The dose was 0.6 µg/mL.", "pdf_page_start": 2,
+             "pdf_page_end": 2, "verified": True, "source_type": "body", "quality_flags": []},
+        ],
+        "pages": [],
+        "extractive_summary": {"evidence": []},
+    }
+    row = compare_papers([paper])[0]
+    path = export_word([row], tmp_path / "method.docx", papers=[paper])
+    text = "\n".join(paragraph.text for paragraph in Document(path).paragraphs)
+    text += "\n" + "\n".join(cell.text for table in Document(path).tables for row in table.rows for cell in row.cells)
+    assert "研究方法：研究方法" not in text
+    assert "The trial used randomization." in text
+    assert "concentration" not in text
+    assert "浓度条件" in text
+
+
+def test_results_r_square_and_p_value_are_not_research_method():
+    pages = [{
+        "source_file": "result.pdf", "page_number": 1,
+        "raw_text": "Results\nThe observed response increased: R² = 0.92, with p = 0.001.",
+        "text": "Results\nThe observed response increased: R² = 0.92, with p = 0.001.",
+        "display_text": "Results\nThe observed response increased: R² = 0.92, with p = 0.001.",
+    }]
+    facts = extract_scientific_facts(pages)
+    assert not any(fact["category"] == "research_method" for fact in facts)
+    assert any(fact["category"] == "major_result" for fact in facts)
+
+
+def test_methods_model_fit_process_can_be_research_method():
+    pages = [{
+        "source_file": "method-fit.pdf", "page_number": 1,
+        "raw_text": "Methods\nWe fitted a model using R² = 0.92 as the fit criterion.",
+        "text": "Methods\nWe fitted a model using R² = 0.92 as the fit criterion.",
+        "display_text": "Methods\nWe fitted a model using R² = 0.92 as the fit criterion.",
+    }]
+    facts = extract_scientific_facts(pages)
+    assert any(fact["category"] == "research_method" for fact in facts)
+
+
+def test_word_methods_do_not_start_with_results_and_excel_method_is_not_category(tmp_path):
+    paper = {
+        "file_name": "result-only.pdf", "title_candidate": "Result Only",
+        "facts": [{"category": "major_result", "evidence_quote_raw": "Results The observed response increased: R² = 0.92, with p = 0.001.",
+                   "evidence_quote_display": "Results The observed response increased: R² = 0.92, with p = 0.001.",
+                   "section": "results", "pdf_page_start": 1, "pdf_page_end": 1, "verified": True, "quality_flags": []}],
+        "pages": [], "extractive_summary": {"evidence": []},
+    }
+    row = compare_papers([paper])[0]
+    assert row["research_methods_original"] == []
+    docx_path = export_word([row], tmp_path / "result-only.docx", papers=[paper])
+    text = "\n".join(p.text for p in Document(docx_path).paragraphs)
+    text += "\n" + "\n".join(c.text for table in Document(docx_path).tables for r in table.rows for c in r.cells)
+    assert "研究方法：研究方法" not in text
+    method_paragraphs = [
+        paragraph.text for paragraph in Document(docx_path).paragraphs
+        if paragraph.text.startswith("研究方法：")
+    ]
+    assert all(not paragraph.removeprefix("研究方法：").lstrip().startswith("Results") for paragraph in method_paragraphs)
+    xlsx_path = export_excel([row], tmp_path / "result-only.xlsx")
+    sheet = load_workbook(xlsx_path, data_only=True).active
+    headers = [str(cell.value or "") for cell in sheet[1]]
+    method_column = headers.index("研究方法") + 1
+    assert sheet.cell(2, method_column).value != "研究方法"
+
+
+def test_methods_mapping_uses_methods_sentence_and_removes_condition_duplicate(tmp_path):
+    method_sentence = "The protocol used a randomized controlled design."
+    condition_sentence = "Samples were stored at 4°C for 8 weeks."
+    paper = {
+        "file_name": "mapped-method.pdf", "title_candidate": "Mapped Method",
+        "included_in_word": True, "selection_rank": 1, "selection_score": 1,
+        "pages": [{
+            "source_file": "mapped-method.pdf", "page_number": 1,
+            "raw_text": f"Methods\n{method_sentence} {condition_sentence}",
+            "text": f"Methods\n{method_sentence} {condition_sentence}",
+            "display_text": f"Methods\n{method_sentence} {condition_sentence}",
+        }],
+        "sections": {"methods": {"title": "Methods", "text": f"{method_sentence} {condition_sentence}"}},
+        "facts": [{
+            "category": "time", "section": "methods", "verified": True,
+            "evidence_quote_raw": condition_sentence, "evidence_quote_display": condition_sentence,
+            "pdf_page_start": 1, "pdf_page_end": 1,
+        }],
+        "extractive_summary": {"evidence": []},
+    }
+    row = compare_papers([paper])[0]
+    assert row["research_methods_original"] == [f"Methods {method_sentence}"]
+    assert row["experimental_conditions"] == [condition_sentence]
+    assert f"Methods {method_sentence}" not in row["experimental_conditions"]
+
+    docx_path = export_word([row], tmp_path / "mapped-method.docx", papers=[paper])
+    paragraphs = [paragraph.text for paragraph in Document(docx_path).paragraphs]
+    assert any(paragraph == f"研究方法：Methods {method_sentence}" for paragraph in paragraphs)
+    xlsx_path = export_excel(
+        [row],
+        tmp_path / "mapped-method.xlsx",
+        inputs=[{"input_id": "input-1", "display_name": "mapped-method.pdf", "source_alias": "mapped-method.pdf",
+                 "content_sha256": "hash", "document_id": "doc-hash", "status": "completed", "duplicate_of": None}],
+        documents=[{"document_id": "doc-hash", "content_sha256": "hash", "source_alias": "mapped-method.pdf",
+                    "input_ids": ["input-1"], "status": "completed"}],
+    )
+    sheet = load_workbook(xlsx_path, data_only=True)["文献汇总"]
+    headers = [str(cell.value or "") for cell in sheet[1]]
+    method_column = headers.index("研究方法") + 1
+    condition_column = headers.index("实验条件") + 1
+    assert str(sheet.cell(2, method_column).value).startswith("Methods ")
+    assert "Samples were stored" not in str(sheet.cell(2, method_column).value)
+    assert str(sheet.cell(2, condition_column).value).startswith("Samples were stored")
+    assert "participants" not in str(sheet.cell(2, condition_column).value)
+    assert "Methods" not in str(sheet.cell(2, condition_column).value)
+    assert "lasted" not in str(sheet.cell(2, condition_column).value)
+
+
+def test_method_condition_dedup_normalizes_prefix_punctuation_and_case():
+    assert _sentence_key("Methods The study lasted 5 weeks.;") == _sentence_key(
+        "the study lasted 5 weeks."
+    )
+
+
+def test_all_synthetic_normal_documents_have_method_content():
+    papers = []
+    for index in range(1, 29):
+        sentence = f"The protocol used a randomized design for synthetic study {index}."
+        condition = f"Samples were stored at {index % 7 + 1}°C for {index % 8 + 1} weeks."
+        papers.append({
+            "file_name": f"normal_{index:02d}.pdf",
+            "pages": [{
+                "source_file": f"normal_{index:02d}.pdf", "page_number": 1,
+                "raw_text": f"Methods\n{sentence} {condition}",
+                "text": f"Methods\n{sentence} {condition}",
+                "display_text": f"Methods\n{sentence} {condition}",
+            }],
+            "sections": {"methods": {"title": "Methods", "text": f"{sentence} {condition}"}},
+            "facts": [{
+                "category": "time", "section": "methods", "verified": True,
+                "evidence_quote_raw": f"Methods {condition}", "evidence_quote_display": f"Methods {condition}",
+                "pdf_page_start": 1, "pdf_page_end": 1,
+            }],
+        })
+    rows = compare_papers(papers)
+    assert len(rows) == 28
+    assert sum(bool(row["research_methods_original"]) for row in rows) == 28
+    assert sum(bool(row["experimental_conditions"]) for row in rows) == 28
+    assert all(
+        not set(row["research_methods_original"]) & set(row["experimental_conditions"])
+        for row in rows
+    )
 
 
 def test_r_square_is_method_evidence_not_major_result_and_word_label(tmp_path):
