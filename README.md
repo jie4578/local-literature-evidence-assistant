@@ -5,7 +5,7 @@
 一个支持离线 PDF 提取、科研事实识别、原文页码追溯、本地全文检索和多格式导出的文献证据整理工具。
 
 > **Preview 版本说明**：本版本是 `v0.3.0-bilingual-corpus-preview` **预览版**，不是稳定版，也不是科研生产级版本。
-> 预留给该版本的 Git Tag 名称为 `v0.3.0-bilingual-corpus-preview`（在正式发布决策前不创建）。
+> `v0.3.0-bilingual-corpus-preview` 已创建为 GitHub Pre-release；本版本仍不是稳定版，也不是科研生产级版本。
 > 真实论文验证规模有限，请以下方「已知限制」和「验证状态」为准，不要用于替代科研人员判断。
 
 ## v0.3 新增能力
