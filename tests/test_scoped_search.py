@@ -128,4 +128,4 @@ def test_failed_document_is_not_added_to_current_batch_index(tmp_path, monkeypat
     assert "valid.pdf" in context["document_sources"]
     assert "failed.pdf" not in context["document_sources"]
     assert "VALID_BATCH_ONLY_PHRASE" in paper_claude.search_local_index("VALID_BATCH_ONLY_PHRASE", context)
-    assert paper_claude.search_local_index("not a valid PDF", context) == "未找到匹配内容。"
+    assert paper_claude.search_local_index("FAILED_DOCUMENT_ONLY_PHRASE", context) == "未找到匹配内容。"

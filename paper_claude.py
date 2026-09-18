@@ -30,6 +30,7 @@ from bilingual import translate_paper_for_display, translated_paper_text
 from local_extractor import extract_local_paper
 from local_summary import LANGUAGE_OPTIONS, compare_papers, extractive_summary, offline_language_notice
 from local_search import LocalSearchIndex, SearchContext
+from passage_retrieval import build_evidence_passages
 from batch_manager import run_local_batch, update_batch_manifest
 from report_modes import NO_WORD_MODE, REPORT_MODE_OPTIONS, report_layout_plan, select_word_papers
 
@@ -269,6 +270,7 @@ def process_local_papers(
             if not pages or paper.get("errors"):
                 continue
             local_index.index_pages(pages)
+            local_index.index_passages(build_evidence_passages(paper))
             first_page = pages[0]
             source_file = first_page.source_file if hasattr(first_page, "source_file") else first_page.get("source_file")
             if source_file:
@@ -389,7 +391,9 @@ def search_local_index(query, search_context=None, limit=20):
         return "❌ 当前批次索引不存在或任务目录已被删除，无法搜索。"
     try:
         with LocalSearchIndex(db_path_resolved) as local_index:
-            rows = local_index.search(
+            if local_index.passage_count() == 0:
+                return "❌ 当前批次没有可用的证据段落索引，请重新完成 Local Offline 文献处理。"
+            rows = local_index.search_passages(
                 query,
                 limit=limit,
                 source_files=context.document_sources,
@@ -398,7 +402,16 @@ def search_local_index(query, search_context=None, limit=20):
         return "❌ 当前批次索引无法读取，请重新完成 Local Offline 文献处理。"
     if not rows:
         return "未找到匹配内容。"
-    return "\n\n".join(f"{row['source_file']} · PDF 第 {row['page_number']} 页\n{row['snippet']}" for row in rows)
+    formatted = []
+    for row in rows:
+        start = row["pdf_page_start"]
+        end = row["pdf_page_end"]
+        page_label = f"PDF 第 {start} 页" if start == end else f"PDF 第 {start}–{end} 页"
+        formatted.append(
+            f"[{row['rank']}] {row['section']} · {page_label}\n"
+            f"{row['source_file']}\n{row['text']}"
+        )
+    return "\n\n---\n\n".join(formatted)
 
 
 def _selected_pdf_paths(pdf_files, selected_files):
@@ -766,8 +779,8 @@ def build_ui():
                         )
                     with gr.Tab("证据与页码"):
                         gr.Markdown("已验证：证据文本与 PDF 原文匹配；未验证：请根据 PDF 物理页码回查原文。source_type 仅表示程序对来源形态的保守判断。")
-                    with gr.Tab("本地搜索"):
-                        gr.Markdown("搜索范围：当前批次（仅搜索最近一次 Local Offline 处理结果，不检索历史任务）。")
+                    with gr.Tab("本地证据检索"):
+                        gr.Markdown("本地证据检索：当前批次（仅搜索最近一次 Local Offline 处理结果，不检索历史任务）。")
                         local_query = gr.Textbox(label="本地证据搜索", placeholder="关键词或精确短语（仅搜索本地索引）")
                         local_search_btn = gr.Button("🔎 搜索本地证据")
                         local_search_output = gr.Textbox(label="本地搜索结果", lines=8)

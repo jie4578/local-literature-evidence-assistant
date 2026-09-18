@@ -70,6 +70,7 @@ class LocalSearchIndex:
         except sqlite3.OperationalError:
             self.fts5_available = False
             self.conn.execute("CREATE TABLE IF NOT EXISTS pages_fallback (source_file TEXT, page_number INTEGER, text TEXT, content_hash TEXT, UNIQUE(source_file, page_number))")
+        self.passage_fts5_available = self._ensure_passage_schema()
         self.conn.commit()
 
     def close(self) -> None:
@@ -84,6 +85,97 @@ class LocalSearchIndex:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
+
+    def _ensure_passage_schema(self) -> bool:
+        """懒创建 passage 表；不触碰旧页面表和旧全局索引。"""
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS passage_metadata ("
+            "passage_id TEXT PRIMARY KEY, source_file TEXT NOT NULL, document_id TEXT, "
+            "section TEXT NOT NULL, pdf_page_start INTEGER NOT NULL, pdf_page_end INTEGER NOT NULL, "
+            "text TEXT NOT NULL, ordinal INTEGER NOT NULL)"
+        )
+        if getattr(self, "passage_fts5_available", None) is False:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS passages_fallback (passage_id TEXT PRIMARY KEY, text TEXT NOT NULL)"
+            )
+            return False
+        existing_fts = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='passages_fts'"
+        ).fetchone()
+        if existing_fts:
+            return True
+        try:
+            self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS passages_fts USING fts5(passage_id UNINDEXED, text)")
+            return True
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS passages_fallback (passage_id TEXT PRIMARY KEY, text TEXT NOT NULL)"
+            )
+            return False
+
+    @staticmethod
+    def _as_passage_dict(passage: Any) -> dict[str, Any]:
+        if hasattr(passage, "to_dict"):
+            return dict(passage.to_dict())
+        if isinstance(passage, Mapping):
+            return dict(passage)
+        raise TypeError("passage 必须是映射或提供 to_dict() 的对象")
+
+    def _remove_passages_for_source(self, source_file: str) -> None:
+        rows = self.conn.execute(
+            "SELECT passage_id FROM passage_metadata WHERE source_file = ?", (source_file,)
+        ).fetchall()
+        for (passage_id,) in rows:
+            if self.passage_fts5_available:
+                self.conn.execute("DELETE FROM passages_fts WHERE passage_id = ?", (passage_id,))
+            else:
+                self.conn.execute("DELETE FROM passages_fallback WHERE passage_id = ?", (passage_id,))
+        self.conn.execute("DELETE FROM passage_metadata WHERE source_file = ?", (source_file,))
+
+    def index_passages(self, passages: Iterable[Any]) -> int:
+        """写入当前批次的 passage 索引；同来源重建时不产生重复记录。"""
+        values = [self._as_passage_dict(item) for item in passages]
+        if not values:
+            return 0
+        self._ensure_passage_schema()
+        sources = dict.fromkeys(str(item.get("source_file", "")).strip() for item in values)
+        for source in sources:
+            if source:
+                self._remove_passages_for_source(source)
+        inserted = 0
+        for item in values:
+            required = ("passage_id", "source_file", "section", "text", "pdf_page_start", "pdf_page_end", "ordinal")
+            if not all(item.get(field) not in (None, "") for field in required):
+                continue
+            passage_id = str(item["passage_id"])
+            text = str(item["text"])
+            if self.passage_fts5_available:
+                self.conn.execute("INSERT INTO passages_fts(passage_id,text) VALUES(?,?)", (passage_id, text))
+            else:
+                self.conn.execute("INSERT OR REPLACE INTO passages_fallback(passage_id,text) VALUES(?,?)", (passage_id, text))
+            self.conn.execute(
+                "INSERT OR REPLACE INTO passage_metadata "
+                "(passage_id,source_file,document_id,section,pdf_page_start,pdf_page_end,text,ordinal) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    passage_id,
+                    str(item["source_file"]),
+                    item.get("document_id"),
+                    str(item["section"]),
+                    int(item["pdf_page_start"]),
+                    int(item["pdf_page_end"]),
+                    text,
+                    int(item["ordinal"]),
+                ),
+            )
+            inserted += 1
+        self.conn.commit()
+        return inserted
+
+    def passage_count(self) -> int:
+        self._ensure_passage_schema()
+        row = self.conn.execute("SELECT COUNT(*) FROM passage_metadata").fetchone()
+        return int(row[0] if row else 0)
 
     def index_pages(self, pages: Iterable[Any]) -> int:
         page_list = list(pages)
@@ -129,9 +221,9 @@ class LocalSearchIndex:
             return "", []
         sources = tuple(
             dict.fromkeys(
-                str(source).strip()
+                source.strip()
                 for source in source_files
-                if str(source).strip()
+                if isinstance(source, str) and source.strip()
             )
         )
         if not sources:
@@ -139,6 +231,38 @@ class LocalSearchIndex:
         # 仅插入由程序生成的占位符，来源值始终作为 SQL 参数传入。
         placeholders = ", ".join("?" for _ in sources)
         return f" AND source_file IN ({placeholders})", list(sources)
+
+    @staticmethod
+    def _value_filter(column: str, values: Iterable[str] | None) -> tuple[str, list[str]]:
+        if values is None:
+            return "", []
+        normalized = tuple(
+            dict.fromkeys(value.strip() for value in values if isinstance(value, str) and value.strip())
+        )
+        if not normalized:
+            return " AND 1 = 0", []
+        placeholders = ", ".join("?" for _ in normalized)
+        return f" AND {column} IN ({placeholders})", list(normalized)
+
+    @staticmethod
+    def _normalize_sections(sections: Iterable[str] | None) -> list[str] | None:
+        if sections is None:
+            return None
+        aliases = {
+            "abstract": "Abstract",
+            "introduction": "Introduction",
+            "background": "Introduction",
+            "methods": "Methods",
+            "method": "Methods",
+            "results": "Results",
+            "discussion": "Discussion",
+            "conclusion": "Conclusion",
+            "references": "References",
+            "unknown": "Unknown",
+        }
+        return list(
+            dict.fromkeys(aliases.get(str(section).strip().casefold(), str(section).strip()) for section in sections)
+        )
 
     def search(
         self,
@@ -184,6 +308,90 @@ class LocalSearchIndex:
                 return []
         return [{"source_file": row[0], "page_number": row[1], "snippet": row[2]} for row in rows]
 
+    def search_passages(
+        self,
+        query: str,
+        limit: int = 10,
+        source_files: Iterable[str] | None = None,
+        sections: Iterable[str] | None = None,
+        exclude_references: bool = True,
+    ) -> list[dict[str, Any]]:
+        """按确定性词法相关性检索证据段落，不生成或改写原文。"""
+        query = unicodedata.normalize("NFKC", (query or "")).strip()
+        if not query:
+            return []
+        limit = max(1, min(int(limit), 200))
+        self._ensure_passage_schema()
+        normalized_sections = self._normalize_sections(sections)
+        source_clause, source_params = self._value_filter("m.source_file", source_files)
+        section_clause, section_params = self._value_filter("m.section", normalized_sections)
+        reference_clause = " AND m.section <> 'References'" if exclude_references else ""
+        filters = f"{source_clause}{section_clause}{reference_clause}"
+        special_pattern = self._statistical_pattern(query)
+        if special_pattern is not None:
+            rows = self.conn.execute(
+                "SELECT m.passage_id,m.source_file,m.document_id,m.section,m.pdf_page_start,"
+                "m.pdf_page_end,m.text,m.ordinal FROM passage_metadata m WHERE 1 = 1"
+                f"{filters}",
+                tuple(source_params) + tuple(section_params),
+            ).fetchall()
+            candidates = [row for row in rows if special_pattern.search(row[6])]
+            candidates.sort(key=lambda row: (-row[6].casefold().count(query.casefold()), len(row[6]), row[0]))
+            return [self._passage_result(row, rank) for rank, row in enumerate(candidates[:limit], 1)]
+
+        if self.passage_fts5_available:
+            if query.startswith('"') and query.endswith('"') and len(query) > 1:
+                match = query
+            else:
+                tokens = re.findall(r"[\w\u4e00-\u9fff]+", query, flags=re.UNICODE)
+                # 使用 OR 获取部分命中，再由 BM25/coverage 做确定性排序。
+                match = " OR ".join(tokens)
+            if not match:
+                return []
+            rows = self.conn.execute(
+                "SELECT m.passage_id,m.source_file,m.document_id,m.section,m.pdf_page_start,"
+                "m.pdf_page_end,m.text,m.ordinal,bm25(passages_fts) AS lexical_score "
+                "FROM passages_fts JOIN passage_metadata m ON m.passage_id = passages_fts.passage_id "
+                "WHERE passages_fts MATCH ?"
+                f"{filters} ORDER BY bm25(passages_fts) ASC, m.passage_id ASC LIMIT ?",
+                (match, *source_params, *section_params, limit),
+            ).fetchall()
+            return [self._passage_result(row[:8], rank, lexical_score=row[8]) for rank, row in enumerate(rows, 1)]
+
+        terms = [term for term in query.strip('"').split() if term]
+        if not terms:
+            return []
+        condition = " OR ".join("LOWER(m.text) LIKE LOWER(?)" for _ in terms)
+        rows = self.conn.execute(
+            "SELECT m.passage_id,m.source_file,m.document_id,m.section,m.pdf_page_start,"
+            "m.pdf_page_end,m.text,m.ordinal FROM passage_metadata m WHERE "
+            f"({condition}){filters}",
+            tuple(f"%{term}%" for term in terms) + tuple(source_params) + tuple(section_params),
+        ).fetchall()
+        phrase = query.strip('"').casefold()
+        def fallback_key(row: tuple[Any, ...]) -> tuple[Any, ...]:
+            text = row[6].casefold()
+            coverage = sum(term.casefold() in text for term in terms)
+            occurrence = sum(text.count(term.casefold()) for term in terms)
+            return (-int(phrase in text), -coverage, -occurrence, len(row[6]), row[0])
+        rows.sort(key=fallback_key)
+        return [self._passage_result(row, rank) for rank, row in enumerate(rows[:limit], 1)]
+
+    @staticmethod
+    def _passage_result(row: tuple[Any, ...], rank: int, lexical_score: float | None = None) -> dict[str, Any]:
+        return {
+            "passage_id": row[0],
+            "source_file": row[1],
+            "document_id": row[2],
+            "section": row[3],
+            "pdf_page_start": row[4],
+            "pdf_page_end": row[5],
+            "text": row[6],
+            "ordinal": row[7],
+            "rank": rank,
+            "lexical_score": lexical_score,
+        }
+
     @staticmethod
     def _statistical_pattern(query: str) -> re.Pattern[str] | None:
         normalized = unicodedata.normalize("NFKC", query).strip()
@@ -219,5 +427,8 @@ class LocalSearchIndex:
         self.conn.execute("DROP TABLE IF EXISTS indexed_files")
         self.conn.execute("DROP TABLE IF EXISTS pages_fallback")
         self.conn.execute("DROP TABLE IF EXISTS pages_fts")
+        self.conn.execute("DROP TABLE IF EXISTS passage_metadata")
+        self.conn.execute("DROP TABLE IF EXISTS passages_fallback")
+        self.conn.execute("DROP TABLE IF EXISTS passages_fts")
         self.conn.commit()
         self.close()
