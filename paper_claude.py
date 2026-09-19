@@ -33,8 +33,19 @@ from local_search import LocalSearchIndex, SearchContext
 from passage_retrieval import build_evidence_passages
 from batch_manager import run_local_batch, update_batch_manifest
 from report_modes import NO_WORD_MODE, REPORT_MODE_OPTIONS, report_layout_plan, select_word_papers
-from retrieval import HybridRetriever
+from retrieval import (
+    HybridRetriever,
+    LocalEmbeddingSemanticRetriever,
+    LocalModelPathError,
+    OptionalSemanticDependencyError,
+    build_semantic_index,
+)
 from retrieval.lexical import LexicalRetriever
+from retrieval.ui_runtime import (
+    LOCAL_MODEL_CACHE,
+    PROFILE_OPTIONS,
+    default_semantic_ui_state,
+)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
@@ -370,7 +381,122 @@ def process_local_papers(
     return (*result, context)
 
 
-def search_local_index(query, search_context=None, limit=20):
+def _semantic_build_status_text(state: dict, message: str | None = None) -> str:
+    if message:
+        return message
+    if not state.get("ready"):
+        return "Hybrid Local 尚未就绪；当前批次仍可使用 Lexical / FTS5。"
+    fingerprint = str(state.get("model_fingerprint") or "")[:12]
+    return (
+        "✅ Hybrid Local 已就绪（仅当前批次）\n\n"
+        f"Profile：{state.get('model_profile') or '未指定'}；"
+        f"维度：{state.get('embedding_dimension') or '未知'}；"
+        f"段落：{state.get('indexed_passages', 0)}；"
+        f"本次编码：{state.get('encoded', 0)}；缓存命中：{state.get('cached', 0)}；"
+        f"模型指纹：{fingerprint or '未知'}"
+    )
+
+
+def _invalid_semantic_state(message: str | None = None) -> tuple[dict, str]:
+    state = default_semantic_ui_state()
+    state["status"] = "NOT_READY"
+    state["warning"] = message
+    return state, message or _semantic_build_status_text(state)
+
+
+def reset_semantic_ui_state(reason: str = "") -> tuple[dict, str]:
+    """重置会话级语义状态；不加载模型，也不读取论文内容。"""
+    state = default_semantic_ui_state()
+    state["warning"] = reason or None
+    return state, reason or _semantic_build_status_text(state)
+
+
+def build_semantic_index_for_ui(search_context, model_profile, model_dir):
+    """由用户明确点击后，加载本地模型并为当前批次建立 semantic cache。"""
+    context = SearchContext.from_value(search_context)
+    if context is None:
+        return _invalid_semantic_state("请先完成一次 Local Offline 文献处理，再构建当前批次语义索引。")
+    if model_profile not in PROFILE_OPTIONS:
+        return _invalid_semantic_state("请选择有效的本地模型 Profile。")
+    if not isinstance(model_dir, str) or not model_dir.strip():
+        return _invalid_semantic_state("请输入已存在的本地模型目录；不会自动下载模型。")
+    try:
+        model_path = Path(model_dir.strip()).expanduser()
+        model_path_valid = model_path.is_dir()
+    except (OSError, TypeError, ValueError):
+        model_path_valid = False
+        model_path = None
+    if not model_path_valid:
+        return _invalid_semantic_state("本地模型目录无效；请确认目录已存在且包含离线模型文件。")
+    try:
+        encoder, cache_hit = LOCAL_MODEL_CACHE.get_or_load(model_profile, model_path)
+        stats = build_semantic_index(
+            context,
+            encoder,
+            source_files=context.document_sources,
+        )
+    except OptionalSemanticDependencyError:
+        return _invalid_semantic_state(
+            "Hybrid Local 需要可选 semantic 依赖；Lexical / FTS5 仍可正常使用。可参考 requirements-semantic.txt。"
+        )
+    except LocalModelPathError:
+        return _invalid_semantic_state("本地模型目录无效；不会根据模型名称访问网络。")
+    except (OSError, ValueError, RuntimeError):
+        return _invalid_semantic_state("本地语义索引构建失败；Lexical / FTS5 仍可使用。")
+    except Exception:
+        # UI 层不泄露模型路径、堆栈或底层依赖细节。
+        return _invalid_semantic_state("本地语义索引构建失败；Lexical / FTS5 仍可使用。")
+
+    state = default_semantic_ui_state()
+    state.update(
+        {
+            "enabled": True,
+            "ready": not bool(stats.get("failed")) and int(stats.get("total_passages", 0)) > 0,
+            "status": "READY_FOR_CURRENT_BATCH" if not stats.get("failed") else "PARTIAL",
+            "model_profile": model_profile,
+            "model_fingerprint": str(stats.get("model_fingerprint") or encoder.model_fingerprint),
+            "batch_id": context.batch_id,
+            "embedding_dimension": int(stats.get("dimension", getattr(encoder, "dimension", 0)) or 0),
+            "indexed_passages": int(stats.get("total_passages", 0)),
+            "encoded": int(stats.get("encoded", 0)),
+            "cached": int(stats.get("cached", 0)),
+            "warning": "；".join(stats.get("warnings") or []) or None,
+        }
+    )
+    if stats.get("failed"):
+        state["ready"] = False
+        state["warning"] = "部分 embedding 未能建立，已保持 Lexical / FTS5 可用。"
+    elif not state["indexed_passages"]:
+        state["ready"] = False
+        state["status"] = "EMPTY"
+        state["warning"] = "当前批次没有可建立语义索引的证据段落；Lexical / FTS5 仍可使用。"
+    return state, _semantic_build_status_text(state)
+
+
+def _format_retrieval_response(retrieval_response, *, warning: str | None = None) -> str:
+    rows = [result.to_dict() for result in retrieval_response.results]
+    if not rows:
+        return warning or "未找到匹配内容。"
+    formatted = []
+    for row in rows:
+        start = row["pdf_page_start"]
+        end = row["pdf_page_end"]
+        page_label = f"PDF 第 {start} 页" if start == end else f"PDF 第 {start}–{end} 页"
+        formatted.append(
+            f"[{row['rank']}] {row['section']} · {page_label}\n"
+            f"{row['source_file']}\n{row['text']}"
+        )
+    prefix = warning + "\n\n" if warning else ""
+    return prefix + "\n\n---\n\n".join(formatted)
+
+
+def search_local_index(
+    query,
+    search_context=None,
+    limit=20,
+    retrieval_mode="Lexical / FTS5",
+    semantic_ui_state=None,
+):
     """只查询当前批次 SQLite 索引；不访问网络或历史全局索引。"""
     if not query or not query.strip():
         return "请输入关键词或精确短语。"
@@ -395,26 +521,64 @@ def search_local_index(query, search_context=None, limit=20):
         with LocalSearchIndex(db_path_resolved) as local_index:
             if local_index.passage_count() == 0:
                 return "❌ 当前批次没有可用的证据段落索引，请重新完成 Local Offline 文献处理。"
-            retrieval_response = HybridRetriever(LexicalRetriever(local_index)).search(
+            lexical_retriever = LexicalRetriever(local_index)
+            if retrieval_mode != "Hybrid Local":
+                retrieval_response = HybridRetriever(lexical_retriever).search(
+                    query,
+                    limit=limit,
+                    source_files=context.document_sources,
+                )
+                return _format_retrieval_response(retrieval_response)
+
+            state = semantic_ui_state if isinstance(semantic_ui_state, dict) else default_semantic_ui_state()
+            if not state.get("ready") or state.get("batch_id") != context.batch_id:
+                retrieval_response = HybridRetriever(lexical_retriever).search(
+                    query,
+                    limit=limit,
+                    source_files=context.document_sources,
+                )
+                return _format_retrieval_response(
+                    retrieval_response,
+                    warning="⚠️ Hybrid Local 尚未针对当前批次就绪，本次结果已回退为 Lexical / FTS5。",
+                )
+            encoder = LOCAL_MODEL_CACHE.get(state.get("model_fingerprint"))
+            if encoder is None:
+                retrieval_response = HybridRetriever(lexical_retriever).search(
+                    query,
+                    limit=limit,
+                    source_files=context.document_sources,
+                )
+                return _format_retrieval_response(
+                    retrieval_response,
+                    warning="⚠️ 当前语义模型缓存已失效，本次结果已回退为 Lexical / FTS5。",
+                )
+            passages = local_index.list_passages(source_files=context.document_sources)
+            retrieval_response = HybridRetriever(
+                lexical_retriever,
+                LocalEmbeddingSemanticRetriever(context, encoder),
+                allowed_passage_ids={item["passage_id"] for item in passages},
+            ).search(
                 query,
                 limit=limit,
                 source_files=context.document_sources,
             )
-            rows = [result.to_dict() for result in retrieval_response.results]
+            if retrieval_response.mode != "hybrid":
+                return _format_retrieval_response(
+                    retrieval_response,
+                    warning="⚠️ 本地语义检索暂不可用，本次结果已回退为 Lexical / FTS5。",
+                )
+            return _format_retrieval_response(retrieval_response, warning="检索模式：Hybrid Local / RRF")
     except (OSError, ValueError, sqlite3.Error):
         return "❌ 当前批次索引无法读取，请重新完成 Local Offline 文献处理。"
-    if not rows:
-        return "未找到匹配内容。"
-    formatted = []
-    for row in rows:
-        start = row["pdf_page_start"]
-        end = row["pdf_page_end"]
-        page_label = f"PDF 第 {start} 页" if start == end else f"PDF 第 {start}–{end} 页"
-        formatted.append(
-            f"[{row['rank']}] {row['section']} · {page_label}\n"
-            f"{row['source_file']}\n{row['text']}"
-        )
-    return "\n\n---\n\n".join(formatted)
+
+
+def search_local_index_for_ui(query, retrieval_mode, search_context, semantic_ui_state):
+    return search_local_index(
+        query,
+        search_context=search_context,
+        retrieval_mode=retrieval_mode,
+        semantic_ui_state=semantic_ui_state,
+    )
 
 
 def _selected_pdf_paths(pdf_files, selected_files):
@@ -617,6 +781,36 @@ def process_papers_for_ui(
     return result[0], result[1], None
 
 
+def process_papers_for_ui_with_semantic_state(
+    pdf_files,
+    api_key,
+    mode=None,
+    progress=gr.Progress(),
+    provider_name="DeepSeek",
+    model="",
+    base_url="",
+    result_language="中文摘要＋英文证据（推荐）",
+    report_mode="自动选择",
+    selected_ai_files=None,
+    ai_confirmed=False,
+):
+    """新的 UI 入口：每次批次处理后明确清空旧 semantic ready 状态。"""
+    result = process_papers_for_ui(
+        pdf_files,
+        api_key,
+        mode=mode,
+        progress=progress,
+        provider_name=provider_name,
+        model=model,
+        base_url=base_url,
+        result_language=result_language,
+        report_mode=report_mode,
+        selected_ai_files=selected_ai_files,
+        ai_confirmed=ai_confirmed,
+    )
+    return result[0], result[1], result[2], default_semantic_ui_state()
+
+
 def test_provider_connection(provider_name, model, base_url, api_key):
     """只发送最小健康检查，不发送论文文本。"""
     if provider_name == "Local Offline":
@@ -685,6 +879,8 @@ def build_ui():
 
         # 每个浏览器会话独立保存当前批次边界；不使用模块级全局索引。
         search_context_state = gr.State(None)
+        # 仅保存小型、可序列化的状态；模型对象留在进程级有界 LRU 中。
+        semantic_ui_state = gr.State(default_semantic_ui_state())
 
         # 顶部标题
         gr.HTML("""
@@ -783,7 +979,30 @@ def build_ui():
                     with gr.Tab("证据与页码"):
                         gr.Markdown("已验证：证据文本与 PDF 原文匹配；未验证：请根据 PDF 物理页码回查原文。source_type 仅表示程序对来源形态的保守判断。")
                     with gr.Tab("本地证据检索"):
-                        gr.Markdown("本地证据检索：当前批次（仅搜索最近一次 Local Offline 处理结果，不检索历史任务）。\n\n检索模式：Lexical / FTS5；本阶段未启用真实语义检索后端。")
+                        gr.Markdown("本地证据检索：当前批次（仅搜索最近一次 Local Offline 处理结果，不检索历史任务）。\n\n默认使用 Lexical / FTS5；Hybrid Local 为可选的本地语义检索，不会自动加载或下载模型。")
+                        retrieval_mode_input = gr.Radio(
+                            ["Lexical / FTS5", "Hybrid Local"],
+                            value="Lexical / FTS5",
+                            label="检索模式",
+                            info="选择 Hybrid Local 后仍需显式构建当前批次语义索引。",
+                        )
+                        with gr.Accordion(
+                            "Hybrid Local 配置（仅主动构建时加载模型）",
+                            visible=False,
+                        ) as hybrid_settings:
+                            model_profile_input = gr.Dropdown(
+                                list(PROFILE_OPTIONS),
+                                value="PubMedBERT",
+                                label="模型 Profile",
+                                info="仅接受已存在的本地模型目录；不会自动下载。",
+                            )
+                            model_dir_input = gr.Textbox(
+                                label="本地模型目录",
+                                placeholder="例如：D:\\models\\local-sentence-transformer",
+                                info="仅当前会话使用，不会保存路径；请使用本机已有模型目录。",
+                            )
+                            build_semantic_btn = gr.Button("🧠 构建 / 加载当前批次语义索引")
+                            semantic_status_output = gr.Markdown("Hybrid Local 尚未就绪；当前批次仍可使用 Lexical / FTS5。")
                         local_query = gr.Textbox(label="本地证据搜索", placeholder="关键词或精确短语（仅搜索本地索引）")
                         local_search_btn = gr.Button("🔎 搜索本地证据")
                         local_search_output = gr.Textbox(label="本地搜索结果", lines=8)
@@ -793,9 +1012,9 @@ def build_ui():
 
         # 绑定事件
         submit_btn.click(
-            fn=process_papers_for_ui,
+            fn=process_papers_for_ui_with_semantic_state,
             inputs=[pdf_input, api_key_input, mode_input, provider_input, model_input, base_url_input, result_language_input, report_mode_input, ai_selection_input, ai_confirm_input],
-            outputs=[result_text, docx_output, search_context_state],
+            outputs=[result_text, docx_output, search_context_state, semantic_ui_state],
         )
 
         pdf_input.change(
@@ -843,9 +1062,36 @@ def build_ui():
             outputs=[connection_output],
         )
         local_search_btn.click(
-            search_local_index,
-            inputs=[local_query, search_context_state],
+            search_local_index_for_ui,
+            inputs=[local_query, retrieval_mode_input, search_context_state, semantic_ui_state],
             outputs=[local_search_output],
+        )
+
+        def update_retrieval_mode_visibility(mode):
+            return gr.update(visible=mode == "Hybrid Local")
+
+        def reset_semantic_for_ui_change(*_values):
+            return reset_semantic_ui_state("模型 Profile 或本地模型目录已变化，请重新显式构建当前批次语义索引。")
+
+        retrieval_mode_input.change(
+            update_retrieval_mode_visibility,
+            inputs=[retrieval_mode_input],
+            outputs=[hybrid_settings],
+        )
+        model_profile_input.change(
+            reset_semantic_for_ui_change,
+            inputs=[model_profile_input, model_dir_input],
+            outputs=[semantic_ui_state, semantic_status_output],
+        )
+        model_dir_input.change(
+            reset_semantic_for_ui_change,
+            inputs=[model_profile_input, model_dir_input],
+            outputs=[semantic_ui_state, semantic_status_output],
+        )
+        build_semantic_btn.click(
+            build_semantic_index_for_ui,
+            inputs=[search_context_state, model_profile_input, model_dir_input],
+            outputs=[semantic_ui_state, semantic_status_output],
         )
 
     return demo
