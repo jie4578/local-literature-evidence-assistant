@@ -1,0 +1,2 @@
+# Optional local semantic retrieval; never installed by the default Local Offline setup.
+sentence-transformers>=5,<7

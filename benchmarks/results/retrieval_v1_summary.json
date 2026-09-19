@@ -1,0 +1,693 @@
+{
+  "benchmark_id": "retrieval_v1",
+  "disclosure": "SYNTHETIC / CONTROLLED BENCHMARK. All passages and queries are program-authored for retrieval testing; this is not real biomedical corpus validation.",
+  "benchmark": {
+    "passages": 80,
+    "queries": 60,
+    "category_counts": {
+      "exact": 15,
+      "paraphrase": 20,
+      "biomedical": 15,
+      "hard_negative": 10
+    },
+    "device": "cpu",
+    "network_during_benchmark": false
+  },
+  "modes": {
+    "FTS5": {
+      "label": "FTS5",
+      "passage_count": 80,
+      "query_count": 60,
+      "dimension": null,
+      "model_load_time_s": 0.0,
+      "embedding_index_build_time_s": 0.0,
+      "cache_reuse_time_s": 0.0,
+      "latency": {
+        "cold_query_median_ms": 0.218,
+        "warm_query_median_ms": 0.149
+      },
+      "metrics": {
+        "overall": {
+          "Recall@1": 0.833333,
+          "Recall@3": 0.916667,
+          "Recall@5": 0.933333,
+          "MRR@10": 0.875278,
+          "nDCG@10": 0.865645
+        },
+        "by_category": {
+          "exact": {
+            "Recall@1": 1.0,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 1.0,
+            "nDCG@10": 1.0
+          },
+          "paraphrase": {
+            "Recall@1": 0.85,
+            "Recall@3": 0.9,
+            "Recall@5": 0.9,
+            "MRR@10": 0.871667,
+            "nDCG@10": 0.889453
+          },
+          "biomedical": {
+            "Recall@1": 0.8,
+            "Recall@3": 0.933333,
+            "Recall@5": 0.933333,
+            "MRR@10": 0.866667,
+            "nDCG@10": 0.840876
+          },
+          "hard_negative": {
+            "Recall@1": 0.6,
+            "Recall@3": 0.8,
+            "Recall@5": 0.9,
+            "MRR@10": 0.708333,
+            "nDCG@10": 0.653648
+          }
+        }
+      }
+    },
+    "BGE semantic": {
+      "overall": {
+        "Recall@1": 0.733333,
+        "Recall@3": 0.866667,
+        "Recall@5": 0.95,
+        "MRR@10": 0.820317,
+        "nDCG@10": 0.85889
+      },
+      "by_category": {
+        "exact": {
+          "Recall@1": 0.933333,
+          "Recall@3": 1.0,
+          "Recall@5": 1.0,
+          "MRR@10": 0.955556,
+          "nDCG@10": 0.966667
+        },
+        "paraphrase": {
+          "Recall@1": 0.7,
+          "Recall@3": 0.8,
+          "Recall@5": 0.9,
+          "MRR@10": 0.779643,
+          "nDCG@10": 0.820636
+        },
+        "biomedical": {
+          "Recall@1": 0.666667,
+          "Recall@3": 0.866667,
+          "Recall@5": 1.0,
+          "MRR@10": 0.796667,
+          "nDCG@10": 0.856307
+        },
+        "hard_negative": {
+          "Recall@1": 0.6,
+          "Recall@3": 0.8,
+          "Recall@5": 0.9,
+          "MRR@10": 0.734286,
+          "nDCG@10": 0.777604
+        }
+      },
+      "latency": {
+        "cold_query_median_ms": 17.429,
+        "warm_query_median_ms": 14.905
+      },
+      "dimension": 384
+    },
+    "BGE hybrid": {
+      "overall": {
+        "Recall@1": 0.8,
+        "Recall@3": 0.95,
+        "Recall@5": 0.966667,
+        "MRR@10": 0.872685,
+        "nDCG@10": 0.890945
+      },
+      "by_category": {
+        "exact": {
+          "Recall@1": 1.0,
+          "Recall@3": 1.0,
+          "Recall@5": 1.0,
+          "MRR@10": 1.0,
+          "nDCG@10": 1.0
+        },
+        "paraphrase": {
+          "Recall@1": 0.85,
+          "Recall@3": 0.95,
+          "Recall@5": 0.95,
+          "MRR@10": 0.891667,
+          "nDCG@10": 0.906546
+        },
+        "biomedical": {
+          "Recall@1": 0.733333,
+          "Recall@3": 0.933333,
+          "Recall@5": 1.0,
+          "MRR@10": 0.838889,
+          "nDCG@10": 0.860146
+        },
+        "hard_negative": {
+          "Recall@1": 0.5,
+          "Recall@3": 0.9,
+          "Recall@5": 0.9,
+          "MRR@10": 0.694444,
+          "nDCG@10": 0.742358
+        }
+      },
+      "latency": {
+        "cold_query_median_ms": 13.851,
+        "warm_query_median_ms": 15.619
+      },
+      "dimension": 384
+    },
+    "E5 semantic": {
+      "overall": {
+        "Recall@1": 0.8,
+        "Recall@3": 0.9,
+        "Recall@5": 0.933333,
+        "MRR@10": 0.85877,
+        "nDCG@10": 0.874987
+      },
+      "by_category": {
+        "exact": {
+          "Recall@1": 1.0,
+          "Recall@3": 1.0,
+          "Recall@5": 1.0,
+          "MRR@10": 1.0,
+          "nDCG@10": 1.0
+        },
+        "paraphrase": {
+          "Recall@1": 0.75,
+          "Recall@3": 0.8,
+          "Recall@5": 0.85,
+          "MRR@10": 0.78881,
+          "nDCG@10": 0.825463
+        },
+        "biomedical": {
+          "Recall@1": 0.866667,
+          "Recall@3": 0.933333,
+          "Recall@5": 0.933333,
+          "MRR@10": 0.9,
+          "nDCG@10": 0.877954
+        },
+        "hard_negative": {
+          "Recall@1": 0.5,
+          "Recall@3": 0.9,
+          "Recall@5": 1.0,
+          "MRR@10": 0.725,
+          "nDCG@10": 0.782065
+        }
+      },
+      "latency": {
+        "cold_query_median_ms": 14.214,
+        "warm_query_median_ms": 14.994
+      },
+      "dimension": 384
+    },
+    "E5 hybrid": {
+      "overall": {
+        "Recall@1": 0.833333,
+        "Recall@3": 0.933333,
+        "Recall@5": 0.933333,
+        "MRR@10": 0.882639,
+        "nDCG@10": 0.889088
+      },
+      "by_category": {
+        "exact": {
+          "Recall@1": 1.0,
+          "Recall@3": 1.0,
+          "Recall@5": 1.0,
+          "MRR@10": 1.0,
+          "nDCG@10": 1.0
+        },
+        "paraphrase": {
+          "Recall@1": 0.8,
+          "Recall@3": 0.9,
+          "Recall@5": 0.9,
+          "MRR@10": 0.85,
+          "nDCG@10": 0.874357
+        },
+        "biomedical": {
+          "Recall@1": 0.866667,
+          "Recall@3": 0.933333,
+          "Recall@5": 0.933333,
+          "MRR@10": 0.9,
+          "nDCG@10": 0.876401
+        },
+        "hard_negative": {
+          "Recall@1": 0.6,
+          "Recall@3": 0.9,
+          "Recall@5": 0.9,
+          "MRR@10": 0.745833,
+          "nDCG@10": 0.77121
+        }
+      },
+      "latency": {
+        "cold_query_median_ms": 13.726,
+        "warm_query_median_ms": 14.572
+      },
+      "dimension": 384
+    },
+    "PubMedBERT semantic": {
+      "overall": {
+        "Recall@1": 0.783333,
+        "Recall@3": 0.966667,
+        "Recall@5": 0.983333,
+        "MRR@10": 0.864583,
+        "nDCG@10": 0.888107
+      },
+      "by_category": {
+        "exact": {
+          "Recall@1": 0.8,
+          "Recall@3": 1.0,
+          "Recall@5": 1.0,
+          "MRR@10": 0.888889,
+          "nDCG@10": 0.909272
+        },
+        "paraphrase": {
+          "Recall@1": 0.75,
+          "Recall@3": 0.95,
+          "Recall@5": 1.0,
+          "MRR@10": 0.8375,
+          "nDCG@10": 0.87808
+        },
+        "biomedical": {
+          "Recall@1": 0.933333,
+          "Recall@3": 1.0,
+          "Recall@5": 1.0,
+          "MRR@10": 0.966667,
+          "nDCG@10": 0.97421
+        },
+        "hard_negative": {
+          "Recall@1": 0.6,
+          "Recall@3": 0.9,
+          "Recall@5": 0.9,
+          "MRR@10": 0.729167,
+          "nDCG@10": 0.747257
+        }
+      },
+      "latency": {
+        "cold_query_median_ms": 25.891,
+        "warm_query_median_ms": 27.547
+      },
+      "dimension": 768
+    },
+    "PubMedBERT hybrid": {
+      "overall": {
+        "Recall@1": 0.833333,
+        "Recall@3": 0.95,
+        "Recall@5": 0.966667,
+        "MRR@10": 0.894742,
+        "nDCG@10": 0.904898
+      },
+      "by_category": {
+        "exact": {
+          "Recall@1": 1.0,
+          "Recall@3": 1.0,
+          "Recall@5": 1.0,
+          "MRR@10": 1.0,
+          "nDCG@10": 1.0
+        },
+        "paraphrase": {
+          "Recall@1": 0.8,
+          "Recall@3": 0.9,
+          "Recall@5": 0.95,
+          "MRR@10": 0.86131,
+          "nDCG@10": 0.894747
+        },
+        "biomedical": {
+          "Recall@1": 0.866667,
+          "Recall@3": 1.0,
+          "Recall@5": 1.0,
+          "MRR@10": 0.933333,
+          "nDCG@10": 0.927981
+        },
+        "hard_negative": {
+          "Recall@1": 0.6,
+          "Recall@3": 0.9,
+          "Recall@5": 0.9,
+          "MRR@10": 0.745833,
+          "nDCG@10": 0.747919
+        }
+      },
+      "latency": {
+        "cold_query_median_ms": 29.203,
+        "warm_query_median_ms": 27.176
+      },
+      "dimension": 768
+    }
+  },
+  "models": {
+    "bge-small-en-v1.5": {
+      "model_alias": "bge-small-en-v1.5",
+      "label": "BGE",
+      "dimension": 384,
+      "max_seq_length": 512,
+      "model_fingerprint": "st_c9170623d4cc60a9a2868259f05223e4",
+      "query_prefix": "",
+      "document_prefix": "",
+      "model_size_bytes": 401113228,
+      "truncated_passages_count": 0,
+      "passage_count": 80,
+      "query_count": 60,
+      "model_load_time_s": 4.551599,
+      "embedding_index_build_time_s": 0.24198,
+      "cache_reuse_time_s": 0.005392,
+      "cache_first": {
+        "total_passages": 80,
+        "cached": 0,
+        "encoded": 80,
+        "failed": 0,
+        "dimension": 384,
+        "model_fingerprint": "st_c9170623d4cc60a9a2868259f05223e4"
+      },
+      "cache_second": {
+        "total_passages": 80,
+        "cached": 80,
+        "encoded": 0,
+        "failed": 0,
+        "dimension": 384,
+        "model_fingerprint": "st_c9170623d4cc60a9a2868259f05223e4"
+      },
+      "batch_isolation_pass": true,
+      "semantic_latency": {
+        "cold_query_median_ms": 17.429,
+        "warm_query_median_ms": 14.905
+      },
+      "hybrid_latency": {
+        "cold_query_median_ms": 13.851,
+        "warm_query_median_ms": 15.619
+      },
+      "semantic_metrics": {
+        "overall": {
+          "Recall@1": 0.733333,
+          "Recall@3": 0.866667,
+          "Recall@5": 0.95,
+          "MRR@10": 0.820317,
+          "nDCG@10": 0.85889
+        },
+        "by_category": {
+          "exact": {
+            "Recall@1": 0.933333,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 0.955556,
+            "nDCG@10": 0.966667
+          },
+          "paraphrase": {
+            "Recall@1": 0.7,
+            "Recall@3": 0.8,
+            "Recall@5": 0.9,
+            "MRR@10": 0.779643,
+            "nDCG@10": 0.820636
+          },
+          "biomedical": {
+            "Recall@1": 0.666667,
+            "Recall@3": 0.866667,
+            "Recall@5": 1.0,
+            "MRR@10": 0.796667,
+            "nDCG@10": 0.856307
+          },
+          "hard_negative": {
+            "Recall@1": 0.6,
+            "Recall@3": 0.8,
+            "Recall@5": 0.9,
+            "MRR@10": 0.734286,
+            "nDCG@10": 0.777604
+          }
+        }
+      },
+      "hybrid_metrics": {
+        "overall": {
+          "Recall@1": 0.8,
+          "Recall@3": 0.95,
+          "Recall@5": 0.966667,
+          "MRR@10": 0.872685,
+          "nDCG@10": 0.890945
+        },
+        "by_category": {
+          "exact": {
+            "Recall@1": 1.0,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 1.0,
+            "nDCG@10": 1.0
+          },
+          "paraphrase": {
+            "Recall@1": 0.85,
+            "Recall@3": 0.95,
+            "Recall@5": 0.95,
+            "MRR@10": 0.891667,
+            "nDCG@10": 0.906546
+          },
+          "biomedical": {
+            "Recall@1": 0.733333,
+            "Recall@3": 0.933333,
+            "Recall@5": 1.0,
+            "MRR@10": 0.838889,
+            "nDCG@10": 0.860146
+          },
+          "hard_negative": {
+            "Recall@1": 0.5,
+            "Recall@3": 0.9,
+            "Recall@5": 0.9,
+            "MRR@10": 0.694444,
+            "nDCG@10": 0.742358
+          }
+        }
+      }
+    },
+    "e5-small-v2": {
+      "model_alias": "e5-small-v2",
+      "label": "E5",
+      "dimension": 384,
+      "max_seq_length": 512,
+      "model_fingerprint": "st_ff13ce855dde99b361b918f401d9133a",
+      "query_prefix": "query: ",
+      "document_prefix": "passage: ",
+      "model_size_bytes": 803206940,
+      "truncated_passages_count": 0,
+      "passage_count": 80,
+      "query_count": 60,
+      "model_load_time_s": 0.107845,
+      "embedding_index_build_time_s": 0.229221,
+      "cache_reuse_time_s": 0.004737,
+      "cache_first": {
+        "total_passages": 80,
+        "cached": 0,
+        "encoded": 80,
+        "failed": 0,
+        "dimension": 384,
+        "model_fingerprint": "st_ff13ce855dde99b361b918f401d9133a"
+      },
+      "cache_second": {
+        "total_passages": 80,
+        "cached": 80,
+        "encoded": 0,
+        "failed": 0,
+        "dimension": 384,
+        "model_fingerprint": "st_ff13ce855dde99b361b918f401d9133a"
+      },
+      "batch_isolation_pass": true,
+      "semantic_latency": {
+        "cold_query_median_ms": 14.214,
+        "warm_query_median_ms": 14.994
+      },
+      "hybrid_latency": {
+        "cold_query_median_ms": 13.726,
+        "warm_query_median_ms": 14.572
+      },
+      "semantic_metrics": {
+        "overall": {
+          "Recall@1": 0.8,
+          "Recall@3": 0.9,
+          "Recall@5": 0.933333,
+          "MRR@10": 0.85877,
+          "nDCG@10": 0.874987
+        },
+        "by_category": {
+          "exact": {
+            "Recall@1": 1.0,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 1.0,
+            "nDCG@10": 1.0
+          },
+          "paraphrase": {
+            "Recall@1": 0.75,
+            "Recall@3": 0.8,
+            "Recall@5": 0.85,
+            "MRR@10": 0.78881,
+            "nDCG@10": 0.825463
+          },
+          "biomedical": {
+            "Recall@1": 0.866667,
+            "Recall@3": 0.933333,
+            "Recall@5": 0.933333,
+            "MRR@10": 0.9,
+            "nDCG@10": 0.877954
+          },
+          "hard_negative": {
+            "Recall@1": 0.5,
+            "Recall@3": 0.9,
+            "Recall@5": 1.0,
+            "MRR@10": 0.725,
+            "nDCG@10": 0.782065
+          }
+        }
+      },
+      "hybrid_metrics": {
+        "overall": {
+          "Recall@1": 0.833333,
+          "Recall@3": 0.933333,
+          "Recall@5": 0.933333,
+          "MRR@10": 0.882639,
+          "nDCG@10": 0.889088
+        },
+        "by_category": {
+          "exact": {
+            "Recall@1": 1.0,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 1.0,
+            "nDCG@10": 1.0
+          },
+          "paraphrase": {
+            "Recall@1": 0.8,
+            "Recall@3": 0.9,
+            "Recall@5": 0.9,
+            "MRR@10": 0.85,
+            "nDCG@10": 0.874357
+          },
+          "biomedical": {
+            "Recall@1": 0.866667,
+            "Recall@3": 0.933333,
+            "Recall@5": 0.933333,
+            "MRR@10": 0.9,
+            "nDCG@10": 0.876401
+          },
+          "hard_negative": {
+            "Recall@1": 0.6,
+            "Recall@3": 0.9,
+            "Recall@5": 0.9,
+            "MRR@10": 0.745833,
+            "nDCG@10": 0.77121
+          }
+        }
+      }
+    },
+    "pubmedbert-base-embeddings": {
+      "model_alias": "pubmedbert-base-embeddings",
+      "label": "PubMedBERT",
+      "dimension": 768,
+      "max_seq_length": 512,
+      "model_fingerprint": "st_c2df202fe6c890d8d3451bc2da55f645",
+      "query_prefix": "",
+      "document_prefix": "",
+      "model_size_bytes": 876894228,
+      "truncated_passages_count": 0,
+      "passage_count": 80,
+      "query_count": 60,
+      "model_load_time_s": 0.266592,
+      "embedding_index_build_time_s": 0.662016,
+      "cache_reuse_time_s": 0.004972,
+      "cache_first": {
+        "total_passages": 80,
+        "cached": 0,
+        "encoded": 80,
+        "failed": 0,
+        "dimension": 768,
+        "model_fingerprint": "st_c2df202fe6c890d8d3451bc2da55f645"
+      },
+      "cache_second": {
+        "total_passages": 80,
+        "cached": 80,
+        "encoded": 0,
+        "failed": 0,
+        "dimension": 768,
+        "model_fingerprint": "st_c2df202fe6c890d8d3451bc2da55f645"
+      },
+      "batch_isolation_pass": true,
+      "semantic_latency": {
+        "cold_query_median_ms": 25.891,
+        "warm_query_median_ms": 27.547
+      },
+      "hybrid_latency": {
+        "cold_query_median_ms": 29.203,
+        "warm_query_median_ms": 27.176
+      },
+      "semantic_metrics": {
+        "overall": {
+          "Recall@1": 0.783333,
+          "Recall@3": 0.966667,
+          "Recall@5": 0.983333,
+          "MRR@10": 0.864583,
+          "nDCG@10": 0.888107
+        },
+        "by_category": {
+          "exact": {
+            "Recall@1": 0.8,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 0.888889,
+            "nDCG@10": 0.909272
+          },
+          "paraphrase": {
+            "Recall@1": 0.75,
+            "Recall@3": 0.95,
+            "Recall@5": 1.0,
+            "MRR@10": 0.8375,
+            "nDCG@10": 0.87808
+          },
+          "biomedical": {
+            "Recall@1": 0.933333,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 0.966667,
+            "nDCG@10": 0.97421
+          },
+          "hard_negative": {
+            "Recall@1": 0.6,
+            "Recall@3": 0.9,
+            "Recall@5": 0.9,
+            "MRR@10": 0.729167,
+            "nDCG@10": 0.747257
+          }
+        }
+      },
+      "hybrid_metrics": {
+        "overall": {
+          "Recall@1": 0.833333,
+          "Recall@3": 0.95,
+          "Recall@5": 0.966667,
+          "MRR@10": 0.894742,
+          "nDCG@10": 0.904898
+        },
+        "by_category": {
+          "exact": {
+            "Recall@1": 1.0,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 1.0,
+            "nDCG@10": 1.0
+          },
+          "paraphrase": {
+            "Recall@1": 0.8,
+            "Recall@3": 0.9,
+            "Recall@5": 0.95,
+            "MRR@10": 0.86131,
+            "nDCG@10": 0.894747
+          },
+          "biomedical": {
+            "Recall@1": 0.866667,
+            "Recall@3": 1.0,
+            "Recall@5": 1.0,
+            "MRR@10": 0.933333,
+            "nDCG@10": 0.927981
+          },
+          "hard_negative": {
+            "Recall@1": 0.6,
+            "Recall@3": 0.9,
+            "Recall@5": 0.9,
+            "MRR@10": 0.745833,
+            "nDCG@10": 0.747919
+          }
+        }
+      }
+    }
+  }
+}

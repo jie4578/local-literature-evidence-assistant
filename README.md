@@ -1,14 +1,24 @@
-# Local-First Literature Evidence Assistant
+# Local-First Literature Evidence Assistant — v0.4.0 Evidence Retrieval Preview
 
-当前版本：`0.3.0-bilingual-corpus-preview`
+当前版本：`v0.4.0-evidence-retrieval-preview`（Unreleased）
 
-一个支持离线 PDF 提取、科研事实识别、原文页码追溯、本地全文检索和多格式导出的文献证据整理工具。
+一个本地优先的文献证据整理工具：从文字版 PDF 提取物理页、按章节组织 passage，使用 SQLite FTS5 检索，并可选择本地语义检索和 RRF 混合排序。结果保留原文证据与 PDF 物理页码，便于人工回查。
 
-> **Preview 版本说明**：本版本是 `v0.3.0-bilingual-corpus-preview` **预览版**，不是稳定版，也不是科研生产级版本。
-> `v0.3.0-bilingual-corpus-preview` 已创建为 GitHub Pre-release；本版本仍不是稳定版，也不是科研生产级版本。
-> 真实论文验证规模有限，请以下方「已知限制」和「验证状态」为准，不要用于替代科研人员判断。
+> **版本边界**：v0.4 是 Evidence Retrieval Preview，不是稳定版或科研生产系统。默认 Local Offline 不联网；Provider Grounded QA 仍为 Experimental，不能替代科研人员判断。
 
-## v0.3 新增能力
+## 当前能力概览
+
+- Batch-scoped Evidence Search：检索只属于当前批次；
+- Section-aware Evidence Passage Retrieval：保留章节、文件和物理页码；
+- Lexical / FTS5：默认检索方式，适合精确关键词和统计表达；
+- Hybrid Local：可选本地 embedding + RRF，不自动下载或加载模型；
+- Local embedding cache：按批次、文本和模型指纹隔离；
+- Evidence Pack 与 Evidence Only QA：默认只展示检索到的证据，不生成自然语言结论；
+- 程序控制的 source、section 和 physical PDF page provenance；
+- 规则型科研事实提取、批量处理、暂停续跑和 JSON/CSV/Excel/Word 导出；
+- 可选 Experimental Provider Grounded QA：仅在用户主动选择 Provider 后使用。
+
+## v0.3 大批量与双语能力
 
 - 默认 `Local Offline`，不需要 API Key；
 - 单篇论文离线整理；
@@ -28,6 +38,56 @@
 - Word、Excel、JSON、CSV 导出；
 - 可选中英对照展示；
 - DeepSeek、OpenAI、Ollama 和 Custom OpenAI-Compatible Provider 架构。
+
+## v0.4 检索模式
+
+| Capability | Status |
+| --- | --- |
+| Batch-scoped lexical retrieval | Validated |
+| Section-aware passage retrieval | Validated |
+| Physical PDF page provenance | Validated |
+| Local embedding backend | Validated on controlled synthetic benchmark |
+| Hybrid RRF | Validated on controlled synthetic benchmark |
+| Evidence Only QA | Validated |
+| Experimental Provider Grounded QA | Experimental |
+| Real biomedical corpus validation | Not completed |
+| OCR | Not supported |
+| Scientific truth validation | Not supported |
+
+### Evidence Only 与 Experimental Provider Grounded QA
+
+`Evidence Only` 是默认 QA 模式：只展示当前批次检索到的 Evidence Pack 和程序绑定的来源信息，不调用 Provider。
+
+`Experimental Provider Grounded QA` 是实验性架构，包含严格 Evidence ID、程序本地引用校验和有限的 Synthetic live-provider 测试。DeepSeek 的 transport 与 post-normalization supported case 已真实成功，但 adversarial combined prompt-injection 场景尚未完成，完整真实 Provider Grounded QA 仍未通过端到端验收。
+
+`verified=true` 只表示原始提取文本与对应 PDF 页面的完全匹配；citation 只表示回答指向了检索 passage，并由程序绑定 source、section 和 PDF 物理页码。它不表示科研事实、语义蕴含、同行评审、重复验证或临床有效性。
+
+## 检索架构
+
+```text
+PDF
+↓
+Physical-page extraction
+↓
+Section-aware passages
+↓
+Batch-scoped SQLite
+↓
+┌──────────────────────────┐
+│ Lexical / FTS5           │
+│ Optional Local Embedding │
+└──────────────────────────┘
+↓
+RRF Hybrid Retrieval
+↓
+Evidence Pack
+↓
+Evidence Only
+    OR
+Experimental Provider Grounded QA
+↓
+Program-bound citations
+```
 
 ## 大批量工作流
 
@@ -51,9 +111,14 @@
 ## 双语与隐私边界
 
 - `Local Offline` 不访问网络，不创建 Provider 客户端；
+- `Lexical / FTS5` 检索完全在本地完成；
+- `Hybrid Local` 使用用户已准备的本地 SentenceTransformer 目录，需安装可选语义依赖并显式构建当前批次索引；
+- 项目不会自动下载 embedding 模型，也不会在上传 PDF 时自动加载模型；
+- `Evidence Only` 不发送 Provider 请求；
 - **本地离线模式不会自动完成语义翻译**。报告使用中文字段名，并原样保留英文证据原文、PDF 物理页码和 `verified` 状态；
 - 中英对照翻译需要用户主动选择 AI Provider；
 - 使用远程 Provider 时，选中的论文文本会发送给对应服务商；
+- Experimental Provider Grounded QA 只发送当前选中的 EvidencePack snippets，不发送整篇 PDF；
 - API Key 仅在当前会话内存中使用；
 - API Key 不写入结果、SQLite、日志或 `.env`；
 - Ollama 可作为本地模型入口，但真实兼容性仍需用户自行验证。
@@ -74,18 +139,28 @@
 
 上述状态不夸大真实验证范围：`Synthetic Corpus PASS` 指合成验收语料，不代表真实论文规模验收；OpenAI、Ollama 和 Custom Endpoint 目前为 Mock 验证。详细数据见 `docs/v0.3_validation.md`。
 
+## 受控语义检索 benchmark
+
+该 benchmark 使用 80 条程序生成 passage 和 60 个人工判定 query，覆盖 Exact、Paraphrase、Biomedical 和 Hard Negative。FTS5 在精确查询上表现强，semantic retrieval 改善了部分语义召回，Hybrid RRF 用于组合 lexical 与 semantic 候选。
+
+PubMedBERT is the current project-recommended profile based on a controlled synthetic retrieval benchmark. 这只是当前受控 benchmark 的质量优先建议，不是“最佳 biomedical model”，也未在真实 biomedical corpus 上验证。完整指标见 [`docs/v0.4_embedding_benchmark.md`](docs/v0.4_embedding_benchmark.md)，公开能力边界见 [`docs/v0.4_validation_summary.md`](docs/v0.4_validation_summary.md)。
+
 ## 已知限制
 
 - 仅支持文字版 PDF；
 - 扫描件无 OCR；
 - 复杂表格、公式和图像识别不稳定；
+- 语义检索 benchmark 主要使用合成数据，尚未完成真实 biomedical corpus 验证；
+- 没有生产规模的向量索引，当前 semantic passage 上限为 10,000；
+- 可选语义依赖较重，需要用户自行准备本地模型目录；
 - 规则型事实提取不等于科研事实核验；
 - `verified=true` 只代表证据原文可在对应 PDF 页找到；
-- 不证明研究结论真实或可靠；
+- citation validation 不等于 semantic entailment；
+- 不证明研究结论真实或可靠，也不保证没有模型幻觉；
 - 不替代科研人员判断；
 - 大文献库验收主要使用合成 PDF；
 - 真实论文 Local Offline 验证目前规模有限；
-- DeepSeek 长论文真实 Provider 测试尚未完整端到端通过；
+- Provider Grounded QA 仍属于实验功能，完整 adversarial live validation 尚未完成；
 - OpenAI、Ollama 和 Custom Endpoint 主要完成 Mock 验证；
 - AI 长论文分析仍属于实验功能。
 
@@ -93,10 +168,12 @@
 
 - Local Offline 默认运行，无 API Key、默认不联网；
 - PyMuPDF 分页提取、页面边界保留和长文 chunk；
+- 按批次隔离的 section-aware passage 检索；
 - 元数据、章节和保守规则型科研事实识别；
 - `raw_text` / `display_text` 双层文本；
 - `verified` evidence 与 PDF 物理页码追溯；
 - SQLite FTS5 本地全文检索；
+- 可选本地 SentenceTransformer embedding、embedding cache 和 RRF Hybrid Retrieval；
 - 只摘取原句的摘取式摘要；
 - 多论文结构化对比；
 - 可选报告模式：自动选择、仅单篇报告、简洁对比、文献库汇总，或仅导出 Excel/JSON；
@@ -132,6 +209,14 @@ python -m venv .venv
 ```
 
 项目不会自动安装依赖，也不会自动配置代理或 Provider。
+
+如需显式启用 `Hybrid Local`，在本地另行安装可选语义依赖，并准备已经存在于本机的 SentenceTransformer 模型目录：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-semantic.txt
+```
+
+项目不会自动下载模型；未安装可选依赖或未构建当前批次语义索引时，`Lexical / FTS5` 仍可用。
 
 ## Windows 启动
 
@@ -178,7 +263,7 @@ docs/images/          README 截图位置
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-当前版本测试结果：145 passed。测试不调用真实 DeepSeek API。
+当前版本离线回归结果：293 passed, 15 warnings。测试不调用真实 Provider/API。
 
 ## 技术亮点
 
@@ -192,11 +277,44 @@ docs/images/          README 截图位置
 - 原子写入 manifest、状态和逐篇缓存；
 - 自动化测试和真实 PDF 离线验收。
 
-## Demo 截图
+## v0.4 Synthetic Demo
 
-以下截图来自真实运行的 `Local Offline` 模式，输入为明确标注的
-`Synthetic Demo PDF`。截图不包含真实论文、用户数据或 API 请求，
-仅用于展示本地解析、证据搜索和导出界面：
+**All screenshots below use synthetic demonstration data. No real scientific
+study or user document is shown.** 这些截图来自真实运行的 `Local Offline`
+Gradio 界面，输入为四页 `Synthetic Demo PDF`；本次演示没有调用 Provider/API。
+
+### Local evidence retrieval
+
+![v0.4 主界面](docs/images/v0.4/01-main-evidence-retrieval.png)
+
+默认使用 Local Offline 和 Lexical / FTS5；启动或上传时不会加载 embedding
+模型，也不会创建 Provider 客户端。
+
+### Short passage with physical PDF page
+
+![v0.4 词法证据搜索](docs/images/v0.4/02-lexical-evidence-search.png)
+
+FTS5 从当前批次返回带章节和 PDF 物理页码的短证据片段；示例查询为
+`p = 0.03`，结果仅来自 Synthetic Demo。
+
+### Evidence Only QA
+
+![v0.4 Evidence Only](docs/images/v0.4/05-evidence-only-qa.png)
+
+Evidence Only 只检索并展示可追溯原文证据，不调用 LLM Provider，也不生成
+自然语言科研结论。
+
+Hybrid Local 的两张可选截图本次未生成：当前机器没有可安全使用的本地
+PubMedBERT 模型 snapshot，因此没有下载模型或创建占位图片。
+
+这些截图只展示 Synthetic Demo 上的软件行为，不验证科研正确性，也不代表
+真实 biomedical retrieval 性能。Local Offline 不上传论文；请勿提交含有
+本地绝对路径、用户名、敏感文件名或 API Key 的截图。
+
+### Previous v0.3 demo
+
+以下历史截图保留用于对照，仍来自真实 `Local Offline` Synthetic Demo，
+不是 v0.4 Hybrid 或 Provider Grounded QA 截图：
 
 ![主界面](docs/images/main-ui.png)
 
@@ -206,10 +324,6 @@ docs/images/          README 截图位置
 
 ![导出结果](docs/images/export-preview.png)
 
-重要边界：Local Offline 不上传论文；截图中的 Synthetic Demo 内容仅用于
-产品演示，不代表真实科研结果。请勿提交含有本地绝对路径、用户名、敏感
-文件名或 API Key 的截图。
-
 ## 后续路线
 
-后续可独立评估 OCR、表格识别、本地 embedding/RAG、人工反馈工作流和可选本地语言模型；这些功能不属于当前 Corpus Preview。
+后续可独立评估 OCR、复杂表格识别、更大规模真实语料验证、人工反馈工作流和更完整的本地 QA 体验；这些功能不属于当前 Evidence Retrieval Preview。
