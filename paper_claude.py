@@ -33,8 +33,10 @@ from local_search import LocalSearchIndex, SearchContext
 from passage_retrieval import build_evidence_passages
 from batch_manager import run_local_batch, update_batch_manifest
 from report_modes import NO_WORD_MODE, REPORT_MODE_OPTIONS, report_layout_plan, select_word_papers
+from grounded_qa import build_evidence_pack, render_evidence_pack
 from retrieval import (
     HybridRetriever,
+    HybridSearchResponse,
     LocalEmbeddingSemanticRetriever,
     LocalModelPathError,
     OptionalSemanticDependencyError,
@@ -490,37 +492,45 @@ def _format_retrieval_response(retrieval_response, *, warning: str | None = None
     return prefix + "\n\n---\n\n".join(formatted)
 
 
-def search_local_index(
+def retrieve_local_response(
     query,
     search_context=None,
     limit=20,
     retrieval_mode="Lexical / FTS5",
     semantic_ui_state=None,
 ):
-    """只查询当前批次 SQLite 索引；不访问网络或历史全局索引。"""
+    """唯一的当前批次 retrieval 入口；Q&A 和搜索 UI 共用它。"""
     if not query or not query.strip():
-        return "请输入关键词或精确短语。"
+        return None, "请输入关键词或精确短语。"
     context = SearchContext.from_value(search_context)
     if context is None:
-        return "请先完成一次 Local Offline 文献处理。"
+        return None, "请先完成一次 Local Offline 文献处理。"
     task_dir = Path(context.task_dir)
     db_path = Path(context.db_path)
     try:
         task_dir_resolved = task_dir.resolve()
         db_path_resolved = db_path.resolve()
     except OSError:
-        return "❌ 当前批次索引不存在或任务目录已被删除，无法搜索。"
+        return None, "❌ 当前批次索引不存在或任务目录已被删除，无法搜索。"
     if (
         not task_dir_resolved.is_dir()
         or db_path_resolved.name != "local_index.sqlite"
         or db_path_resolved.parent != task_dir_resolved
         or not db_path_resolved.is_file()
     ):
-        return "❌ 当前批次索引不存在或任务目录已被删除，无法搜索。"
+        return None, "❌ 当前批次索引不存在或任务目录已被删除，无法搜索。"
     try:
         with LocalSearchIndex(db_path_resolved) as local_index:
             if local_index.passage_count() == 0:
-                return "❌ 当前批次没有可用的证据段落索引，请重新完成 Local Offline 文献处理。"
+                return (
+                    HybridSearchResponse(
+                        results=[],
+                        mode="lexical",
+                        semantic_status="unavailable",
+                        warnings=["当前批次没有可用的证据段落索引。"],
+                    ),
+                    None,
+                )
             lexical_retriever = LexicalRetriever(local_index)
             if retrieval_mode != "Hybrid Local":
                 retrieval_response = HybridRetriever(lexical_retriever).search(
@@ -528,7 +538,7 @@ def search_local_index(
                     limit=limit,
                     source_files=context.document_sources,
                 )
-                return _format_retrieval_response(retrieval_response)
+                return retrieval_response, None
 
             state = semantic_ui_state if isinstance(semantic_ui_state, dict) else default_semantic_ui_state()
             if not state.get("ready") or state.get("batch_id") != context.batch_id:
@@ -537,10 +547,8 @@ def search_local_index(
                     limit=limit,
                     source_files=context.document_sources,
                 )
-                return _format_retrieval_response(
-                    retrieval_response,
-                    warning="⚠️ Hybrid Local 尚未针对当前批次就绪，本次结果已回退为 Lexical / FTS5。",
-                )
+                retrieval_response.warnings.append("Hybrid Local 尚未针对当前批次就绪，已回退为 Lexical / FTS5。")
+                return retrieval_response, None
             encoder = LOCAL_MODEL_CACHE.get(state.get("model_fingerprint"))
             if encoder is None:
                 retrieval_response = HybridRetriever(lexical_retriever).search(
@@ -548,10 +556,8 @@ def search_local_index(
                     limit=limit,
                     source_files=context.document_sources,
                 )
-                return _format_retrieval_response(
-                    retrieval_response,
-                    warning="⚠️ 当前语义模型缓存已失效，本次结果已回退为 Lexical / FTS5。",
-                )
+                retrieval_response.warnings.append("当前语义模型缓存已失效，已回退为 Lexical / FTS5。")
+                return retrieval_response, None
             passages = local_index.list_passages(source_files=context.document_sources)
             retrieval_response = HybridRetriever(
                 lexical_retriever,
@@ -563,13 +569,35 @@ def search_local_index(
                 source_files=context.document_sources,
             )
             if retrieval_response.mode != "hybrid":
-                return _format_retrieval_response(
-                    retrieval_response,
-                    warning="⚠️ 本地语义检索暂不可用，本次结果已回退为 Lexical / FTS5。",
-                )
-            return _format_retrieval_response(retrieval_response, warning="检索模式：Hybrid Local / RRF")
+                retrieval_response.warnings.append("本地语义检索暂不可用，已回退为 Lexical / FTS5。")
+            return retrieval_response, None
     except (OSError, ValueError, sqlite3.Error):
-        return "❌ 当前批次索引无法读取，请重新完成 Local Offline 文献处理。"
+        return None, "❌ 当前批次索引无法读取，请重新完成 Local Offline 文献处理。"
+
+
+def search_local_index(
+    query,
+    search_context=None,
+    limit=20,
+    retrieval_mode="Lexical / FTS5",
+    semantic_ui_state=None,
+):
+    """只查询当前批次 SQLite 索引；不访问网络或历史全局索引。"""
+    retrieval_response, error = retrieve_local_response(
+        query,
+        search_context=search_context,
+        limit=limit,
+        retrieval_mode=retrieval_mode,
+        semantic_ui_state=semantic_ui_state,
+    )
+    if error:
+        return error
+    warning = None
+    if retrieval_response.mode == "hybrid":
+        warning = "检索模式：Hybrid Local / RRF"
+    elif retrieval_mode == "Hybrid Local" and retrieval_response.warnings:
+        warning = "⚠️ " + retrieval_response.warnings[-1]
+    return _format_retrieval_response(retrieval_response, warning=warning)
 
 
 def search_local_index_for_ui(query, retrieval_mode, search_context, semantic_ui_state):
@@ -579,6 +607,21 @@ def search_local_index_for_ui(query, retrieval_mode, search_context, semantic_ui
         retrieval_mode=retrieval_mode,
         semantic_ui_state=semantic_ui_state,
     )
+
+
+def answer_evidence_only_for_ui(question, retrieval_mode, search_context, semantic_ui_state):
+    """Evidence Only UI：只检索并回填原文，不创建或调用 Provider。"""
+    retrieval_response, error = retrieve_local_response(
+        question,
+        search_context=search_context,
+        limit=8,
+        retrieval_mode=retrieval_mode,
+        semantic_ui_state=semantic_ui_state,
+    )
+    if error:
+        return error
+    pack = build_evidence_pack(question, retrieval_response, search_context=search_context)
+    return render_evidence_pack(pack)
 
 
 def _selected_pdf_paths(pdf_files, selected_files):
@@ -1006,6 +1049,20 @@ def build_ui():
                         local_query = gr.Textbox(label="本地证据搜索", placeholder="关键词或精确短语（仅搜索本地索引）")
                         local_search_btn = gr.Button("🔎 搜索本地证据")
                         local_search_output = gr.Textbox(label="本地搜索结果", lines=8)
+                        gr.Markdown("### 证据问答")
+                        qa_question = gr.Textbox(
+                            label="问题",
+                            placeholder="例如：哪些证据提示延长热暴露会影响抗体稳定性？",
+                        )
+                        qa_answer_mode = gr.Radio(
+                            ["Evidence Only"],
+                            value="Evidence Only",
+                            label="回答模式",
+                            interactive=False,
+                            info="只展示当前批次检索到的原文证据，不生成自然语言科研结论。",
+                        )
+                        qa_btn = gr.Button("📚 检索证据")
+                        qa_output = gr.Textbox(label="Evidence Pack", lines=12)
                     with gr.Tab("导出结果"):
                         docx_output = gr.File(label="📥 下载 Word 文档", visible=True)
                         gr.Markdown("JSON、CSV、Excel 和 Word 会保存到本次任务的本地结果目录。")
@@ -1065,6 +1122,11 @@ def build_ui():
             search_local_index_for_ui,
             inputs=[local_query, retrieval_mode_input, search_context_state, semantic_ui_state],
             outputs=[local_search_output],
+        )
+        qa_btn.click(
+            answer_evidence_only_for_ui,
+            inputs=[qa_question, retrieval_mode_input, search_context_state, semantic_ui_state],
+            outputs=[qa_output],
         )
 
         def update_retrieval_mode_visibility(mode):
