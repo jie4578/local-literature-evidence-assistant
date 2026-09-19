@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.4.0-evidence-retrieval-preview] — Unreleased
+
+### Added
+
+- Batch-scoped evidence search with section-aware passages and source/section filters;
+- Lexical / FTS5 ranking, optional local embedding backend and local embedding cache;
+- Hybrid Local retrieval with Reciprocal Rank Fusion (RRF) and explicit opt-in UI;
+- EvidencePack、Evidence Only QA、程序控制的 source/section/physical-page 引用渲染；
+- Experimental grounded-QA compatibility normalization for `claim` → `text` and non-empty string `limitations` → list.
+
+### Changed
+
+- Local Offline remains the default and does not load semantic models or Provider clients automatically;
+- Hybrid Local requires optional semantic dependencies, a user-provided local model directory, and explicit current-batch index construction;
+- Public documentation now separates validated Evidence Retrieval from Experimental Provider Grounded QA.
+
+### Validation
+
+- Lexical retrieval、passage retrieval、物理页码 provenance 和 Evidence Only QA 已完成离线验证；
+- Local embedding and Hybrid RRF validated on a controlled synthetic benchmark；
+- DeepSeek transport and a post-normalization supported synthetic case succeeded once；
+- Full adversarial live Provider Grounded QA validation remains incomplete.
+
+### Known limitations
+
+- Benchmark data is primarily synthetic and no real biomedical corpus has been validated;
+- No OCR, production-scale vector index, or scientific-truth validation;
+- Complex tables may extract poorly；citation validation does not establish semantic entailment；
+- Provider Grounded QA remains Experimental and does not guarantee absence of hallucinations.
+
 ## [0.3.0-bilingual-corpus-preview]
 
 预览版本，已发布为 GitHub Pre-release `v0.3.0-bilingual-corpus-preview`。不是稳定版，也不是科研生产级版本。
