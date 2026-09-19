@@ -143,7 +143,7 @@ Program-bound citations
 
 该 benchmark 使用 80 条程序生成 passage 和 60 个人工判定 query，覆盖 Exact、Paraphrase、Biomedical 和 Hard Negative。FTS5 在精确查询上表现强，semantic retrieval 改善了部分语义召回，Hybrid RRF 用于组合 lexical 与 semantic 候选。
 
-PubMedBERT is the current project-recommended profile based on a controlled synthetic retrieval benchmark. 这只是当前受控 benchmark 的质量优先建议，不是“最佳 biomedical model”，也未在真实 biomedical corpus 上验证。完整指标见 [`docs/v0.4_embedding_benchmark.md`](docs/v0.4_embedding_benchmark.md)。
+PubMedBERT is the current project-recommended profile based on a controlled synthetic retrieval benchmark. 这只是当前受控 benchmark 的质量优先建议，不是“最佳 biomedical model”，也未在真实 biomedical corpus 上验证。完整指标见 [`docs/v0.4_embedding_benchmark.md`](docs/v0.4_embedding_benchmark.md)，公开能力边界见 [`docs/v0.4_validation_summary.md`](docs/v0.4_validation_summary.md)。
 
 ## 已知限制
 
