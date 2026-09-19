@@ -277,11 +277,44 @@ docs/images/          README 截图位置
 - 原子写入 manifest、状态和逐篇缓存；
 - 自动化测试和真实 PDF 离线验收。
 
-## Demo 截图
+## v0.4 Synthetic Demo
 
-以下截图来自真实运行的 `Local Offline` 模式，输入为明确标注的
-`Synthetic Demo PDF`。截图不包含真实论文、用户数据或 API 请求，
-仅用于展示 v0.3 local workflow 的本地解析、证据搜索和导出界面；它们不是 v0.4 Hybrid 或 Provider Grounded QA 截图：
+**All screenshots below use synthetic demonstration data. No real scientific
+study or user document is shown.** 这些截图来自真实运行的 `Local Offline`
+Gradio 界面，输入为四页 `Synthetic Demo PDF`；本次演示没有调用 Provider/API。
+
+### Local evidence retrieval
+
+![v0.4 主界面](docs/images/v0.4/01-main-evidence-retrieval.png)
+
+默认使用 Local Offline 和 Lexical / FTS5；启动或上传时不会加载 embedding
+模型，也不会创建 Provider 客户端。
+
+### Short passage with physical PDF page
+
+![v0.4 词法证据搜索](docs/images/v0.4/02-lexical-evidence-search.png)
+
+FTS5 从当前批次返回带章节和 PDF 物理页码的短证据片段；示例查询为
+`p = 0.03`，结果仅来自 Synthetic Demo。
+
+### Evidence Only QA
+
+![v0.4 Evidence Only](docs/images/v0.4/05-evidence-only-qa.png)
+
+Evidence Only 只检索并展示可追溯原文证据，不调用 LLM Provider，也不生成
+自然语言科研结论。
+
+Hybrid Local 的两张可选截图本次未生成：当前机器没有可安全使用的本地
+PubMedBERT 模型 snapshot，因此没有下载模型或创建占位图片。
+
+这些截图只展示 Synthetic Demo 上的软件行为，不验证科研正确性，也不代表
+真实 biomedical retrieval 性能。Local Offline 不上传论文；请勿提交含有
+本地绝对路径、用户名、敏感文件名或 API Key 的截图。
+
+### Previous v0.3 demo
+
+以下历史截图保留用于对照，仍来自真实 `Local Offline` Synthetic Demo，
+不是 v0.4 Hybrid 或 Provider Grounded QA 截图：
 
 ![主界面](docs/images/main-ui.png)
 
@@ -290,10 +323,6 @@ docs/images/          README 截图位置
 ![证据搜索](docs/images/evidence-search.png)
 
 ![导出结果](docs/images/export-preview.png)
-
-重要边界：Local Offline 不上传论文；截图中的 Synthetic Demo 内容仅用于
-产品演示，不代表真实科研结果。请勿提交含有本地绝对路径、用户名、敏感
-文件名或 API Key 的截图。
 
 ## 后续路线
 
