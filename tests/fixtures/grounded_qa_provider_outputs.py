@@ -104,7 +104,7 @@ COMPATIBILITY_MATRIX = {
 COMPATIBILITY_EXPECTED = {
     "A_canonical_valid": "STRICT_ACCEPT",
     "B_limitations_missing": "STRICT_REJECT",
-    "C_limitations_string": "STRICT_REJECT",
+    "C_limitations_string": "NORMALIZED_ACCEPT",
     "D_limitations_null": "STRICT_REJECT",
     "E_evidence_ids_string": "STRICT_REJECT",
     "F_evidence_ids_one": "STRICT_ACCEPT",
@@ -113,9 +113,23 @@ COMPATIBILITY_EXPECTED = {
     "I_top_level_reasoning": "STRICT_REJECT",
     "J_status_uppercase": "STRICT_REJECT",
     "K_status_lowercase": "STRICT_ACCEPT",
-    "L_claim_key_instead_of_text": "STRICT_REJECT",
+    "L_claim_key_instead_of_text": "NORMALIZED_ACCEPT",
     "M_citations_key_instead_of_evidence_ids": "STRICT_REJECT",
     "N_supported_empty_claims": "STRICT_REJECT",
     "O_insufficient_empty_claims": "STRICT_ACCEPT",
     "P_insufficient_with_claims": "STRICT_REJECT",
+}
+
+# Reconstructed from the safe Phase 9D2 diagnostic shape.  This is synthetic
+# and is not presented as a raw DeepSeek response or as a replay artifact.
+LIVE_OBSERVED_SHAPE_V1 = {
+    "fixture_label": "STRUCTURE_RECONSTRUCTED_FROM_SAFE_DIAGNOSTIC",
+    "payload": {
+        "status": "supported",
+        "claims": [
+            {"claim": "Synthetic claim one", "evidence_ids": ["E1"]},
+            {"claim": "Synthetic claim two", "evidence_ids": ["E2"]},
+        ],
+        "limitations": "Synthetic limitation.",
+    },
 }

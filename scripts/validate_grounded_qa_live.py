@@ -32,6 +32,7 @@ from grounded_qa import (
     render_grounded_answer,
     _strip_json_fence,
 )
+from grounded_qa_compat import normalize_grounded_payload
 from providers import ProviderError, ProviderResponse, create_provider, provider_defaults
 
 
@@ -313,6 +314,12 @@ def _safe_validation_trace(content: Any, answer: Any, evidence_pack: EvidencePac
     finish_reason = getattr(content, "finish_reason", None)
     trace: dict[str, Any] = {
         "parse_status": "NOT_REACHED" if finish_reason == "length" else "FAIL",
+        "compatibility_normalization_status": "NOT_REACHED",
+        "compatibility_normalization_applied_rules": [],
+        "compatibility_normalization_warnings": [],
+        "compatibility_normalization_conflicts": [],
+        "pre_normalization_shape": None,
+        "post_normalization_shape": None,
         "top_level_schema_status": "NOT_REACHED",
         "claim_schema_status": "NOT_REACHED",
         "citation_status": "NOT_REACHED",
@@ -343,6 +350,18 @@ def _safe_validation_trace(content: Any, answer: Any, evidence_pack: EvidencePac
         trace["validation_reasons"] = ["TOP_LEVEL_SCHEMA_ERROR"]
         trace["validation_status"] = "FAIL"
         return trace
+    normalization = normalize_grounded_payload(payload)
+    trace["compatibility_normalization_status"] = normalization.status
+    trace["compatibility_normalization_applied_rules"] = list(normalization.applied_rules)
+    trace["compatibility_normalization_warnings"] = list(normalization.warnings)
+    trace["compatibility_normalization_conflicts"] = list(normalization.conflicts)
+    trace["pre_normalization_shape"] = normalization.pre_normalization_shape
+    trace["post_normalization_shape"] = normalization.post_normalization_shape
+    if not normalization.ok:
+        trace["validation_reasons"] = list(dict.fromkeys(normalization.warnings + normalization.conflicts))
+        trace["validation_status"] = "FAIL"
+        return trace
+    payload = normalization.normalized_payload
     shape = response_shape_diagnostic(payload)
     trace["response_shape"] = shape.as_dict()
     top_reasons: list[str] = []

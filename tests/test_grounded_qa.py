@@ -178,14 +178,15 @@ def test_mixed_valid_and_invalid_claims_keeps_only_valid_claim():
     assert "UNKNOWN_EVIDENCE_ID" in answer.warnings
 
 
-def test_provider_page_and_source_fields_are_ignored_by_renderer():
+def test_provider_page_and_source_fields_are_rejected_by_schema():
     pack = _pack(_result("P1", "source passage", start=2, end=3))
     answer = parse_grounded_answer(
         '{"status":"supported","claims":[{"text":"claim","evidence_ids":["E1"],"page":99,"source_file":"fake.pdf"}],"limitations":[]}',
         pack,
     )
     rendered = render_grounded_answer(answer, pack)
-    assert "PDF 第 2–3 页" in rendered
+    assert answer.status == "validation_failed"
+    assert "PDF 第 2–3 页" not in rendered
     assert "PDF 第 99 页" not in rendered
     assert "fake.pdf" not in rendered
     assert "PROVIDER_CITATION_METADATA_IGNORED" in answer.warnings

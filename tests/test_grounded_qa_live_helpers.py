@@ -10,6 +10,7 @@ from retrieval.models import HybridSearchResponse, RetrievalResult
 from tests.fixtures.grounded_qa_provider_outputs import (
     COMPATIBILITY_EXPECTED,
     COMPATIBILITY_MATRIX,
+    LIVE_OBSERVED_SHAPE_V1,
     REPLAY_FIXTURES,
 )
 from scripts.validate_grounded_qa_live import (
@@ -296,13 +297,13 @@ def test_mixed_valid_and_invalid_claims_is_diagnosed_and_valid_claim_survives():
     assert state.validated_answers == 1
 
 
-def test_page_metadata_is_ignored_and_does_not_change_program_bound_citation():
+def test_page_metadata_is_rejected_and_never_changes_program_bound_citation():
     content = '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"],"page":99}],"limitations":[]}'
     answer, record, _ = _run_static(content)
-    assert answer.status == "supported"
+    assert answer.status == "validation_failed"
     assert record["category"] == "VALIDATION_FAIL"
     assert "UNSAFE_CLAIM_METADATA" in record["diagnostic"]["validation_reasons"]
-    assert record["evidence_ids"] == ["E1"]
+    assert record["evidence_ids"] == []
 
 
 @pytest.mark.parametrize("fixture_name", ["A_valid_json", "B_markdown_fenced_json"])
@@ -331,9 +332,26 @@ def test_schema_compatibility_matrix_has_explicit_strict_expectation(fixture_nam
     answer, record, _ = _run_static(COMPATIBILITY_MATRIX[fixture_name], _pack_two() if fixture_name == "G_evidence_ids_two" else None)
     expected = COMPATIBILITY_EXPECTED[fixture_name]
     accepted = record["diagnostic"]["validation_status"] == "PASS"
-    assert accepted is (expected == "STRICT_ACCEPT")
+    assert accepted is expected.endswith("ACCEPT")
     if expected == "STRICT_REJECT":
         assert record["diagnostic"]["validation_reasons"]
+
+
+def test_reconstructed_observed_shape_records_safe_normalization_stages():
+    answer, record, _ = _run_static(json.dumps(LIVE_OBSERVED_SHAPE_V1["payload"]), _pack_two())
+    trace = record["validation_trace"]
+    assert answer.status == "supported"
+    assert trace["compatibility_normalization_status"] == "APPLIED"
+    assert set(trace["compatibility_normalization_applied_rules"]) == {
+        "claim_to_text",
+        "limitations_string_to_list",
+    }
+    assert trace["pre_normalization_shape"]["claim_shapes"][0]["text_present"] is False
+    assert trace["post_normalization_shape"]["claim_shapes"][0]["text_present"] is True
+    assert trace["top_level_schema_status"] == "PASS"
+    assert trace["claim_schema_status"] == "PASS"
+    assert trace["citation_status"] == "PASS"
+    assert trace["final_validation_status"] == "PASS"
 
 
 def test_response_shape_diagnostic_contains_structure_only():

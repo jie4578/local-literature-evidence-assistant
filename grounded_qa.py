@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping
 
 from providers import ProviderResponse
+from grounded_qa_compat import normalize_grounded_payload
 
 
 MAX_EVIDENCE_ITEMS = 8
@@ -329,23 +330,44 @@ def validate_grounded_answer(payload: Any, evidence_pack: EvidencePack) -> Groun
     """Validate claims and bind only known E# IDs; never accept page metadata."""
     if not isinstance(payload, Mapping):
         return GroundedAnswer("validation_failed", warnings=("INVALID_JSON_STRUCTURE",))
+    allowed_top_level = {"status", "claims", "limitations"}
+    unknown_top_level = set(payload.keys()) - allowed_top_level
+    if unknown_top_level:
+        return GroundedAnswer("validation_failed", warnings=("INVALID_SCHEMA", "UNKNOWN_TOP_LEVEL_FIELD"))
+    required_top_level = allowed_top_level - set(payload.keys())
+    if required_top_level:
+        return GroundedAnswer("validation_failed", warnings=("INVALID_SCHEMA", "TOP_LEVEL_SCHEMA_ERROR"))
     status = payload.get("status")
     if status not in {"supported", "insufficient_evidence"}:
         return GroundedAnswer("validation_failed", warnings=("INVALID_STATUS",))
-    if status == "insufficient_evidence":
-        return GroundedAnswer(
-            "insufficient_evidence",
-            limitations=_string_list(payload.get("limitations")),
-        )
+    limitations = payload.get("limitations")
+    if not isinstance(limitations, list) or any(not isinstance(item, str) for item in limitations):
+        return GroundedAnswer("validation_failed", warnings=("INVALID_SCHEMA", "LIMITATIONS_INVALID_TYPE"))
     raw_claims = payload.get("claims")
     if not isinstance(raw_claims, list):
         return GroundedAnswer("validation_failed", warnings=("INVALID_CLAIMS",))
+    if status == "insufficient_evidence":
+        if raw_claims:
+            return GroundedAnswer("validation_failed", warnings=("STATUS_CLAIM_INCONSISTENCY",))
+        return GroundedAnswer(
+            "insufficient_evidence",
+            limitations=_string_list(limitations),
+        )
     valid_ids = {item.evidence_id for item in evidence_pack.items}
     order = {item.evidence_id: index for index, item in enumerate(evidence_pack.items)}
     claims: list[GroundedClaim] = []
     warnings: list[str] = []
     for raw_claim in raw_claims:
-        if not isinstance(raw_claim, Mapping) or not isinstance(raw_claim.get("text"), str) or not raw_claim["text"].strip():
+        if not isinstance(raw_claim, Mapping):
+            warnings.append("INVALID_CLAIM")
+            continue
+        unknown_claim_fields = set(raw_claim.keys()) - {"text", "evidence_ids"}
+        if unknown_claim_fields:
+            warnings.append("UNKNOWN_CLAIM_FIELD")
+            if unknown_claim_fields.intersection({"page", "pdf_page", "source_file", "section"}):
+                warnings.append("PROVIDER_CITATION_METADATA_IGNORED")
+            continue
+        if not isinstance(raw_claim.get("text"), str) or not raw_claim["text"].strip():
             warnings.append("INVALID_CLAIM")
             continue
         ids, warning = _normalize_evidence_ids(raw_claim.get("evidence_ids"), valid_ids, order)
@@ -357,15 +379,13 @@ def validate_grounded_answer(payload: Any, evidence_pack: EvidencePack) -> Groun
     if not claims:
         return GroundedAnswer(
             "validation_failed",
-            limitations=_string_list(payload.get("limitations")),
+            limitations=_string_list(limitations),
             warnings=tuple(dict.fromkeys(warnings or ["NO_VALID_CLAIMS"])),
         )
-    if any(key in raw_claim for raw_claim in raw_claims if isinstance(raw_claim, Mapping) for key in ("page", "pdf_page", "source_file", "section")):
-        warnings.append("PROVIDER_CITATION_METADATA_IGNORED")
     return GroundedAnswer(
         "supported",
         claims=tuple(claims),
-        limitations=_string_list(payload.get("limitations")),
+        limitations=_string_list(limitations),
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
@@ -384,7 +404,13 @@ def parse_grounded_answer(content: Any, evidence_pack: EvidencePack) -> Grounded
         payload = json.loads(_strip_json_fence(text))
     except (TypeError, ValueError, json.JSONDecodeError):
         return GroundedAnswer("validation_failed", warnings=("INVALID_JSON",))
-    return validate_grounded_answer(payload, evidence_pack)
+    if not isinstance(payload, Mapping):
+        return GroundedAnswer("validation_failed", warnings=("INVALID_JSON_STRUCTURE",))
+    normalization = normalize_grounded_payload(payload)
+    if not normalization.ok:
+        warnings = tuple(dict.fromkeys(normalization.warnings + normalization.conflicts))
+        return GroundedAnswer("validation_failed", warnings=warnings or ("NORMALIZATION_FAILED",))
+    return validate_grounded_answer(normalization.normalized_payload, evidence_pack)
 
 
 def generate_grounded_answer(
