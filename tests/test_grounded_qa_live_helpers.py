@@ -7,12 +7,18 @@ import pytest
 from grounded_qa import build_evidence_pack
 from providers import ProviderResponse
 from retrieval.models import HybridSearchResponse, RetrievalResult
-from tests.fixtures.grounded_qa_provider_outputs import REPLAY_FIXTURES
+from tests.fixtures.grounded_qa_provider_outputs import (
+    COMPATIBILITY_EXPECTED,
+    COMPATIBILITY_MATRIX,
+    REPLAY_FIXTURES,
+)
 from scripts.validate_grounded_qa_live import (
     FULL_DOCUMENT_SENTINEL,
     LIVE_MAX_OUTPUT_TOKENS,
     LiveRequestState,
     _provider_error_category,
+    response_shape_diagnostic,
+    _safe_validation_trace,
     UNSELECTED_SENTINEL,
     audit_provider_payload,
     local_provider_preflight,
@@ -36,6 +42,32 @@ def _pack():
     )
     response = HybridSearchResponse([result], "lexical", "disabled", [])
     return build_evidence_pack("What happened?", response)
+
+
+def _pack_two():
+    first = RetrievalResult(
+        passage_id="P1",
+        source_file="synthetic.pdf",
+        document_id="doc",
+        section="Results",
+        pdf_page_start=2,
+        pdf_page_end=2,
+        text="Prolonged thermal exposure increased aggregation.",
+        rank=1,
+        retrieval_sources=["lexical"],
+    )
+    second = RetrievalResult(
+        passage_id="P2",
+        source_file="synthetic.pdf",
+        document_id="doc",
+        section="Discussion",
+        pdf_page_start=3,
+        pdf_page_end=3,
+        text="Extended heat exposure reduced stability.",
+        rank=2,
+        retrieval_sources=["lexical"],
+    )
+    return build_evidence_pack("What happened?", HybridSearchResponse([first, second], "lexical", "disabled", []))
 
 
 class FakeProvider:
@@ -216,16 +248,16 @@ class StaticProvider:
         return ProviderResponse(self.content)
 
 
-def _run_static(content):
+def _run_static(content, pack=None):
     state = LiveRequestState(max_requests=1)
-    answer, record = run_live_request(StaticProvider(content), _pack(), state, scenario="fixture", api_key="secret")
+    answer, record = run_live_request(StaticProvider(content), pack or _pack(), state, scenario="fixture", api_key="secret")
     return answer, record, state
 
 
 def test_malformed_json_is_diagnosed_without_raw_response():
     answer, record, state = _run_static('{"status": "supported"')
     assert answer.status == "validation_failed"
-    assert record["diagnostic"]["validation_reasons"] == ["INVALID_JSON"]
+    assert record["diagnostic"]["validation_reasons"] == ["JSON_PARSE_ERROR"]
     assert record["diagnostic"]["parse_status"] == "FAIL"
     assert state.generation_attempts == 1
     assert state.responses_received == 1
@@ -259,7 +291,7 @@ def test_mixed_valid_and_invalid_claims_is_diagnosed_and_valid_claim_survives():
     answer, record, state = _run_static(content)
     assert answer.status == "supported"
     assert len(answer.claims) == 1
-    assert record["diagnostic"]["validation_status"] == "PASS"
+    assert record["diagnostic"]["validation_status"] == "FAIL"
     assert "UNKNOWN_EVIDENCE_ID" in record["diagnostic"]["validation_reasons"]
     assert state.validated_answers == 1
 
@@ -268,6 +300,7 @@ def test_page_metadata_is_ignored_and_does_not_change_program_bound_citation():
     content = '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"],"page":99}],"limitations":[]}'
     answer, record, _ = _run_static(content)
     assert answer.status == "supported"
+    assert record["category"] == "VALIDATION_FAIL"
     assert "UNSAFE_CLAIM_METADATA" in record["diagnostic"]["validation_reasons"]
     assert record["evidence_ids"] == ["E1"]
 
@@ -291,6 +324,62 @@ def test_prompt_injection_style_output_is_not_a_semantic_truth_test():
     assert answer.status == "supported"
     assert record["diagnostic"]["validation_status"] == "PASS"
     assert record["rendered_contains_injection_claim"] is True
+
+
+@pytest.mark.parametrize("fixture_name", sorted(COMPATIBILITY_MATRIX))
+def test_schema_compatibility_matrix_has_explicit_strict_expectation(fixture_name):
+    answer, record, _ = _run_static(COMPATIBILITY_MATRIX[fixture_name], _pack_two() if fixture_name == "G_evidence_ids_two" else None)
+    expected = COMPATIBILITY_EXPECTED[fixture_name]
+    accepted = record["diagnostic"]["validation_status"] == "PASS"
+    assert accepted is (expected == "STRICT_ACCEPT")
+    if expected == "STRICT_REJECT":
+        assert record["diagnostic"]["validation_reasons"]
+
+
+def test_response_shape_diagnostic_contains_structure_only():
+    payload = {
+        "status": "supported",
+        "claims": [
+            {
+                "text": "SECRET_CLAIM_SENTINEL",
+                "evidence_ids": ["E1"],
+            }
+        ],
+        "limitations": [],
+        "raw": "SECRET_RAW_RESPONSE_SENTINEL",
+        "path": "C:\\SyntheticPrivateUser\\fixture.pdf",
+        "key": "sk-secret-test",
+    }
+    diagnostic = response_shape_diagnostic(payload)
+    rendered = json.dumps(diagnostic.as_dict(), ensure_ascii=False)
+    assert "SECRET_CLAIM_SENTINEL" not in rendered
+    assert "SECRET_RAW_RESPONSE_SENTINEL" not in rendered
+    assert "PrivateUser" not in rendered
+    assert "sk-secret-test" not in rendered
+    assert diagnostic.claim_shapes[0]["text_type"] == "str"
+    assert diagnostic.claim_shapes[0]["evidence_ids_count"] == 1
+
+
+def test_validation_stages_separate_citation_from_schema():
+    answer, record, _ = _run_static(
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E999"]}],"limitations":[]}'
+    )
+    trace = record["validation_trace"]
+    assert answer.status == "validation_failed"
+    assert trace["parse_status"] == "PASS"
+    assert trace["top_level_schema_status"] == "PASS"
+    assert trace["claim_schema_status"] == "PASS"
+    assert trace["citation_status"] == "FAIL"
+    assert "UNKNOWN_EVIDENCE_ID" in trace["validation_reasons"]
+
+
+def test_validation_stages_report_status_consistency():
+    _, record, _ = _run_static(
+        '{"status":"insufficient_evidence","claims":[{"text":"x","evidence_ids":["E1"]}],"limitations":[]}'
+    )
+    trace = record["validation_trace"]
+    assert trace["status_consistency_status"] == "FAIL"
+    assert "STATUS_CLAIM_INCONSISTENCY" in trace["validation_reasons"]
 
 
 def test_diagnostics_never_include_secret_path_or_raw_response():

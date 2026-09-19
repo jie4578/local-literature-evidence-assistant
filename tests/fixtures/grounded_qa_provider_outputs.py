@@ -42,3 +42,80 @@ REPLAY_FIXTURES = {
     "I_forged_page_metadata": MODEL_PAGE_METADATA,
     "J_prompt_injection_style": PROMPT_INJECTION_STYLE,
 }
+
+COMPATIBILITY_MATRIX = {
+    "A_canonical_valid": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"]}],'
+        '"limitations":[]}'
+    ),
+    "B_limitations_missing": '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"]}]}',
+    "C_limitations_string": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"]}],'
+        '"limitations":"none"}'
+    ),
+    "D_limitations_null": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"]}],'
+        '"limitations":null}'
+    ),
+    "E_evidence_ids_string": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":"E1"}],'
+        '"limitations":[]}'
+    ),
+    "F_evidence_ids_one": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"]}],'
+        '"limitations":[]}'
+    ),
+    "G_evidence_ids_two": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1","E2"]}],'
+        '"limitations":[]}'
+    ),
+    "H_claim_extra_confidence": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"],"confidence":0.9}],'
+        '"limitations":[]}'
+    ),
+    "I_top_level_reasoning": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"]}],'
+        '"limitations":[],"reasoning":"omitted"}'
+    ),
+    "J_status_uppercase": (
+        '{"status":"SUPPORTED","claims":[{"text":"x","evidence_ids":["E1"]}],'
+        '"limitations":[]}'
+    ),
+    "K_status_lowercase": (
+        '{"status":"supported","claims":[{"text":"x","evidence_ids":["E1"]}],'
+        '"limitations":[]}'
+    ),
+    "L_claim_key_instead_of_text": (
+        '{"status":"supported","claims":[{"claim":"x","evidence_ids":["E1"]}],'
+        '"limitations":[]}'
+    ),
+    "M_citations_key_instead_of_evidence_ids": (
+        '{"status":"supported","claims":[{"text":"x","citations":["E1"]}],'
+        '"limitations":[]}'
+    ),
+    "N_supported_empty_claims": '{"status":"supported","claims":[],"limitations":[]}',
+    "O_insufficient_empty_claims": '{"status":"insufficient_evidence","claims":[],"limitations":[]}',
+    "P_insufficient_with_claims": (
+        '{"status":"insufficient_evidence","claims":[{"text":"x","evidence_ids":["E1"]}],'
+        '"limitations":[]}'
+    ),
+}
+
+COMPATIBILITY_EXPECTED = {
+    "A_canonical_valid": "STRICT_ACCEPT",
+    "B_limitations_missing": "STRICT_REJECT",
+    "C_limitations_string": "STRICT_REJECT",
+    "D_limitations_null": "STRICT_REJECT",
+    "E_evidence_ids_string": "STRICT_REJECT",
+    "F_evidence_ids_one": "STRICT_ACCEPT",
+    "G_evidence_ids_two": "STRICT_ACCEPT",
+    "H_claim_extra_confidence": "STRICT_REJECT",
+    "I_top_level_reasoning": "STRICT_REJECT",
+    "J_status_uppercase": "STRICT_REJECT",
+    "K_status_lowercase": "STRICT_ACCEPT",
+    "L_claim_key_instead_of_text": "STRICT_REJECT",
+    "M_citations_key_instead_of_evidence_ids": "STRICT_REJECT",
+    "N_supported_empty_claims": "STRICT_REJECT",
+    "O_insufficient_empty_claims": "STRICT_ACCEPT",
+    "P_insufficient_with_claims": "STRICT_REJECT",
+}
